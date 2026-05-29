@@ -11,7 +11,7 @@ typedef int8_t DFMatrixType;
 typedef u_int8_t BMatrixType;
 #define MATRIX_EPSILON 1e-5
 
-void i8gemm_k(const DFMatrixType *A, const BMatrixType *B, const MatrixType *C, int m, int k, int n);
+void i8gemm_k(const DFMatrixType *A, const BMatrixType *B, MatrixType *C, int m, int k, int n, int ldc);
 
 static double get_time(struct timespec *start,
     struct timespec *end)
@@ -258,7 +258,6 @@ int main(int argc, char* argv[]) {
     reorder_B_8x1(B, B_reordered, k, n);
     // 保留原始C的副本用于验证
     MatrixType* C_orig = (MatrixType*)malloc(m*n * sizeof(MatrixType));
-    MatrixType* C_reordered = (MatrixType*)malloc(m*n * sizeof(MatrixType));
     memcpy(C_orig, C, m * n * sizeof(MatrixType));
     MatrixType* C_orig2 = (MatrixType*)malloc(m*n * sizeof(MatrixType));
     memcpy(C_orig2, C, m * n * sizeof(MatrixType));
@@ -272,15 +271,13 @@ int main(int argc, char* argv[]) {
     // }
     clock_gettime(CLOCK_MONOTONIC_RAW, &start);
     for (int i = 0; i < looptime; i++) {
-        i8gemm_k(A_reordered, B_reordered, C, m, k, n);
+        i8gemm_k(A_reordered, B_reordered, C, m, k, n, n);
     }
     clock_gettime(CLOCK_MONOTONIC_RAW, &end);
     time_used = get_time(&start, &end);
     flops = 2 * m * n * k * (double)looptime / time_used * 1e-9;
-    printf("size = %ld , looptime = %ld\n", 2 * m * n * k, looptime);
+    printf("size = %ld , looptime = %d\n", (long)2 * m * n * k, looptime);
     printf("time_used = %lf ms, FLOPS = %lf GFLOPS\n", time_used * 1e6 / looptime, flops);
-    reorder_C_2x2(C, C_reordered, m, n);
-    
     // // 调试时可取消注释查看矩阵内容
     printf("\nMatrix A:\n");
     row_dfmatrix_print(A, m, k);
@@ -293,8 +290,8 @@ int main(int argc, char* argv[]) {
     printf("\nCorrect Matrix C:\n");
     matrix_print(C_orig2, m, n); 
     printf("\nResult Matrix C:\n");
-    matrix_print(C_reordered, m, n);
-    if (result_check(A, B, C_orig, C_reordered, m, k, n)) {
+    matrix_print(C, m, n);
+    if (result_check(A, B, C_orig, C, m, k, n)) {
         printf("successfully!\n");
     } else {    
         printf("Validation failed!\n");

@@ -1,6 +1,4 @@
 // i8gemm_k_ldc.S
-// 版本1：在 .S 内直接输出行主序 C，消除外部 reorder_C_2x2 调用
-//
 // void i8gemm_k(const int8_t  *A_reordered,   // x0
 //               const uint8_t *B_reordered,   // x1
 //               int32_t       *C,             // x2  行主序输出，stride = ldc
@@ -18,20 +16,19 @@
 
 .text
 .align 4
-.global i8gemm_k
+.global _i8gemm_k
 
-// ── 寄存器别名（M_COUNT 改为 x10，LDC 占用原 M_COUNT 的 x6 位置）
 #define A_ADDR_ORG  x0
 #define B_ADDR      x1
 #define C_ADDR_0    x2
 #define M           x3
 #define K           x4
 #define N           x5
-#define LDC         x6      // 新增参数（原 M_COUNT=x6 移到 x10）
+#define LDC         x6
 
 #define N_COUNT     x30
-#define C_N_BASE    x27     // 当前 N 块的列起点地址（原 C_ADDR_1，但语义不同）
-#define M_COUNT     x10     // 原 x6，按需求改为 x10
+#define C_N_BASE    x27
+#define M_COUNT     x10
 #define C_ADDR_3    x11
 #define C_ADDR_4    x25
 #define B_ADDR_1    x19
@@ -43,8 +40,8 @@
 #define K_TAIL      x28
 #define A_ADDR      x29
 
-#define LDC_B       x9      // ldc * 4（字节步长，预计算）
-#define C_M_BASE    x26     // 当前 M 块 row0 的行主序地址
+#define LDC_B       x9
+#define C_M_BASE    x26
 
 // ── INIT / RESTORE ────────────────────────────────────────────
 .macro INIT
@@ -83,47 +80,44 @@
 //
 // 使用临时寄存器 x7,x8,x11~x17（caller-saved，无需保存）
 .macro LOAD_C_ROWMAJOR
-    // 8 行地址（C_M_BASE 已指向 row0）
     mov  x8,  C_M_BASE
     add  x11, x8,  LDC_B
-    add  x12, x11, LDC_B
-    add  x13, x12, LDC_B
-    add  x14, x13, LDC_B
-    add  x15, x14, LDC_B
-    add  x16, x15, LDC_B
-    add  x17, x16, LDC_B
+    add  x12, x8,  LDC_B, lsl #1
+    add  x14, x8,  LDC_B, lsl #2
+    add  x13, x11, LDC_B, lsl #1
+    add  x15, x11, LDC_B, lsl #2
+    add  x16, x12, LDC_B, lsl #2
+    add  x17, x13, LDC_B, lsl #2
 
-    // row0(v0_lo,v0_hi), row1(v1_lo,v1_hi) → v9~v12
-    ldp  q0, q1, [x8]           // row0: [c0~c3]=v0, [c4~c7]=v1
-    ldp  q2, q3, [x11]          // row1: [c0~c3]=v2, [c4~c7]=v3
-    zip1 v9.2d,  v0.2d, v2.2d   // [r0c0,r0c1, r1c0,r1c1]
-    zip2 v10.2d, v0.2d, v2.2d   // [r0c2,r0c3, r1c2,r1c3]
-    zip1 v11.2d, v1.2d, v3.2d   // [r0c4,r0c5, r1c4,r1c5]
-    zip2 v12.2d, v1.2d, v3.2d   // [r0c6,r0c7, r1c6,r1c7]
+    ldp  q0, q1, [x8]
+    ldp  q2, q3, [x11]
+    ldp  q4, q5, [x12]
+    ldp  q6, q7, [x13]
+    ldp  q8, q25, [x14]
+    ldp  q26, q27, [x15]
+    ldp  q28, q29, [x16]
+    ldp  q30, q31, [x17]
 
-    // row2, row3 → v13~v16
-    ldp  q0, q1, [x12]
-    ldp  q2, q3, [x13]
-    zip1 v13.2d, v0.2d, v2.2d
-    zip2 v14.2d, v0.2d, v2.2d
-    zip1 v15.2d, v1.2d, v3.2d
-    zip2 v16.2d, v1.2d, v3.2d
+    zip1 v9.2d,  v0.2d, v2.2d
+    zip2 v10.2d, v0.2d, v2.2d
+    zip1 v11.2d, v1.2d, v3.2d
+    zip2 v12.2d, v1.2d, v3.2d
 
-    // row4, row5 → v17~v20
-    ldp  q0, q1, [x14]
-    ldp  q2, q3, [x15]
-    zip1 v17.2d, v0.2d, v2.2d
-    zip2 v18.2d, v0.2d, v2.2d
-    zip1 v19.2d, v1.2d, v3.2d
-    zip2 v20.2d, v1.2d, v3.2d
+    zip1 v13.2d, v4.2d, v6.2d
+    zip2 v14.2d, v4.2d, v6.2d
+    zip1 v15.2d, v5.2d, v7.2d
+    zip2 v16.2d, v5.2d, v7.2d
 
-    // row6, row7 → v21~v24
-    ldp  q0, q1, [x16]
-    ldp  q2, q3, [x17]
-    zip1 v21.2d, v0.2d, v2.2d
-    zip2 v22.2d, v0.2d, v2.2d
-    zip1 v23.2d, v1.2d, v3.2d
-    zip2 v24.2d, v1.2d, v3.2d
+    zip1 v17.2d, v8.2d, v10.2d
+    zip2 v18.2d, v8.2d, v10.2d
+    zip1 v19.2d, v9.2d, v11.2d
+    zip2 v20.2d, v9.2d, v11.2d
+
+    zip1 v21.2d, v12.2d, v14.2d
+    zip2 v22.2d, v12.2d, v14.2d
+    zip1 v23.2d, v13.2d, v15.2d
+    zip2 v24.2d, v13.2d, v15.2d
+
 .endm
 
 // ── STORE_C_ROWMAJOR：将 blocked v9~v24 按行主序写回 C ────────
@@ -132,50 +126,45 @@
 //   zip1(v9,v10).2d = [v9.d[0],v10.d[0]] = [r0c0|r0c1, r0c2|r0c3] → row0[c0..c3]  ✓
 //   zip2(v9,v10).2d = [v9.d[1],v10.d[1]] = [r1c0|r1c1, r1c2|r1c3] → row1[c0..c3]  ✓
 .macro STORE_C_ROWMAJOR
-    // 8 行地址（C_M_BASE 指向当前块 row0）
     mov  x8,  C_M_BASE
     add  x11, x8,  LDC_B
-    add  x12, x11, LDC_B
-    add  x13, x12, LDC_B
-    add  x14, x13, LDC_B
-    add  x15, x14, LDC_B
-    add  x16, x15, LDC_B
-    add  x17, x16, LDC_B
+    add  x12, x8,  LDC_B, lsl #1
+    add  x14, x8,  LDC_B, lsl #2
+    add  x13, x11, LDC_B, lsl #1
+    add  x15, x11, LDC_B, lsl #2
+    add  x16, x12, LDC_B, lsl #2
+    add  x17, x13, LDC_B, lsl #2
 
-    // row0, row1 ← v9~v12
-    zip1 v0.2d, v9.2d,  v10.2d  // row0[c0..c3]
-    zip1 v1.2d, v11.2d, v12.2d  // row0[c4..c7]
-    zip2 v2.2d, v9.2d,  v10.2d  // row1[c0..c3]
-    zip2 v3.2d, v11.2d, v12.2d  // row1[c4..c7]
+    zip1 v0.2d, v9.2d,  v10.2d
+    zip1 v1.2d, v11.2d, v12.2d
+    zip2 v2.2d, v9.2d,  v10.2d
+    zip2 v3.2d, v11.2d, v12.2d
+
+    zip1 v4.2d, v13.2d, v14.2d
+    zip1 v5.2d, v15.2d, v16.2d
+    zip2 v6.2d, v13.2d, v14.2d
+    zip2 v7.2d, v15.2d, v16.2d
+
+    zip1 v8.2d, v17.2d, v18.2d
+    zip1 v25.2d, v19.2d, v20.2d
+    zip2 v26.2d, v17.2d, v18.2d
+    zip2 v27.2d, v19.2d, v20.2d
+
+    zip1 v28.2d, v21.2d, v22.2d
+    zip1 v29.2d, v23.2d, v24.2d
+    zip2 v30.2d, v21.2d, v22.2d
+    zip2 v31.2d, v23.2d, v24.2d
+
     stp  q0, q1, [x8]
     stp  q2, q3, [x11]
-
-    // row2, row3 ← v13~v16
-    zip1 v0.2d, v13.2d, v14.2d
-    zip1 v1.2d, v15.2d, v16.2d
-    zip2 v2.2d, v13.2d, v14.2d
-    zip2 v3.2d, v15.2d, v16.2d
-    stp  q0, q1, [x12]
-    stp  q2, q3, [x13]
-
-    // row4, row5 ← v17~v20
-    zip1 v0.2d, v17.2d, v18.2d
-    zip1 v1.2d, v19.2d, v20.2d
-    zip2 v2.2d, v17.2d, v18.2d
-    zip2 v3.2d, v19.2d, v20.2d
-    stp  q0, q1, [x14]
-    stp  q2, q3, [x15]
-
-    // row6, row7 ← v21~v24
-    zip1 v0.2d, v21.2d, v22.2d
-    zip1 v1.2d, v23.2d, v24.2d
-    zip2 v2.2d, v21.2d, v22.2d
-    zip2 v3.2d, v23.2d, v24.2d
-    stp  q0, q1, [x16]
-    stp  q2, q3, [x17]
+    stp  q4, q5, [x12]
+    stp  q6, q7, [x13]
+    stp  q8, q25, [x14]
+    stp  q26, q27, [x15]
+    stp  q28, q29, [x16]
+    stp  q30, q31, [x17]
 .endm
 
-// ── 计算宏（与原版完全相同）─────────────────────────────────────
 .macro LOAD_A0_B0
     ldp q0, q1, [A_ADDR], #32
     ldp q2, q3, [A_ADDR], #32
@@ -259,23 +248,13 @@
     smmla v24.4s, v27.16b, v31.16b
 .endm
 
-// ── 函数体 ───────────────────────────────────────────────────
-// 循环结构与原版完全对应，仅 C 指针管理方式改变：
-//   原版：C_ADDR_0/C_ADDR_1 顺序读写 blocked 格式（指针自动推进）
-//   新版：C_M_BASE 跟踪当前 8×8 块在行主序 C 中的 row0 地址
-//         C_N_BASE（x27）跟踪 N 循环的列起点（每次 N 迭代 +32 字节）
-//         每次 M 迭代 C_M_BASE += 8 * LDC_B
-//
-// B 指针推进逻辑与原版完全相同（B_ADDR / B_ADDR_1 交换机制不变）
-i8gemm_k:
+_i8gemm_k:
     INIT
 
-    lsl  LDC_B, LDC, #2         // LDC_B(x9) = ldc * 4 字节
+    lsl  LDC_B, LDC, #2
 
-    // C_N_BASE 初始指向 C[0][0]，N 循环每次 +32（8列 * 4字节）
-    mov  C_N_BASE, C_ADDR_0     // x27 = C 基址
+    mov  C_N_BASE, C_ADDR_0
 
-    // B_ADDR_1 保存整个计算的 B 起点（原版逻辑）
     mov  B_ADDR_1, B_ADDR
 
 // ── N 方向外层循环（每次 8 列）─────────────────────────────
@@ -285,11 +264,9 @@ i8gemm_k:
     b.eq 301f
 
 101:
-    // 原版：mov B_ADDR, B_ADDR_1（N 循环用 B_ADDR 保存 N-tile 起点）
     mov  B_ADDR,  B_ADDR_1
     mov  A_ADDR,  A_ADDR_ORG
 
-    // C_M_BASE 从当前列块的第 0 行开始
     mov  C_M_BASE, C_N_BASE
 
     asr  M_COUNT, M, #3
@@ -298,7 +275,6 @@ i8gemm_k:
 
 // ── M 方向内层循环（每次 8 行）──────────────────────────────
 102:
-    // 原版：mov B_ADDR_1, B_ADDR（保存当前 B 块起点供 K 循环使用）
     mov  B_ADDR_1, B_ADDR
 
     LOAD_C_ROWMAJOR
@@ -321,13 +297,11 @@ i8gemm_k:
 
     STORE_C_ROWMAJOR
 
-    // C_M_BASE 下移 8 行
-    add  C_M_BASE, C_M_BASE, LDC_B, lsl #3   // += 8 * LDC_B
+    add  C_M_BASE, C_M_BASE, LDC_B, lsl #3
 
     subs M_COUNT, M_COUNT, #1
     b.gt 102b
 
-    // N 循环结束：C_N_BASE 右移 8 列，B_ADDR_1 已由 K 循环推进到下一个 N-tile
     add  C_N_BASE, C_N_BASE, #32
 
     subs N_COUNT, N_COUNT, #1
