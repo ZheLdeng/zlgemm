@@ -1,0 +1,24 @@
+# Binaries
+calculate_lda
+calculate_lda_test
+calculate_ldc
+calculate_pack_test
+bench_lda
+bench_lda_cmp
+
+# Logs
+*.log
+
+# IDE / local config
+.claude/settings.local.json
+.claude/plans/
+
+# Pack kernel (work in progress, not ready)
+i8gemm_k_pack.S
+calculatei8mm_pack.c
+
+# ld kernel build artifacts
+calculate_ld_test
+i8gemm_k_ld.o
+bench_ld_cmp
+bench_stride_cmp
