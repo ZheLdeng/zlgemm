@@ -1,12 +1,12 @@
 // i8gemm_k_ldc.S
 // void i8gemm_k(const int8_t  *A_reordered,   // x0
 //               const uint8_t *B_reordered,   // x1
-//               int32_t       *C,             // x2  行主序输出，stride = ldc
+//               int32_t       *C,             // x2  行主序输出，stride = N
 //               int            m,             // x3
 //               int            k,             // x4
-//               int            n,             // x5
-//               int            ldc);          // x6  C 每行元素数
+//               int            n);            // x5  同时用作 C 的 stride (ldc == n)
 //
+// 循环顺序: M-N-K (最外层M, 中间N, 最内层K) = 从内到外 KNM
 // 内核每次处理 8×8 输出块，v9~v24 的 smmla 格式：
 //   v9  = [C[r0][c0], C[r0][c1], C[r1][c0], C[r1][c1]]
 //   v10 = [C[r0][c2], C[r0][c3], C[r1][c2], C[r1][c3]]
@@ -24,7 +24,6 @@
 #define M           x3
 #define K           x4
 #define N           x5
-#define LDC         x6
 
 #define N_COUNT     x30
 #define C_N_BASE    x27
@@ -42,6 +41,12 @@
 
 #define LDC_B       x9
 #define C_M_BASE    x26
+
+// M-N-K loop order additions
+#define K_STRIDE    x21   // = K * 8, byte stride between A/B panels
+#define B_N_BASE    x22   // B base pointer for current N panel
+#define A_SAVED     x28   // saved A panel base for N-loop reset
+#define C_ROW_BASE  x25   // C row base for current M block
 
 // ── INIT / RESTORE ────────────────────────────────────────────
 .macro INIT
@@ -251,31 +256,33 @@
 _i8gemm_k:
     INIT
 
-    lsl  LDC_B, LDC, #2
+    lsl  LDC_B, N, #2          // LDC_B = N * 4 (ldc == n)
+    lsl  K_STRIDE, K, #3       // K_STRIDE = K * 8 (bytes per A/B panel)
 
-    mov  C_N_BASE, C_ADDR_0
+    mov  A_ADDR, A_ADDR_ORG     // A walks forward through M panels
+    mov  C_ROW_BASE, C_ADDR_0   // C row base walks forward through M rows
 
-    mov  B_ADDR_1, B_ADDR
-
-// ── N 方向外层循环（每次 8 列）─────────────────────────────
+// ── M 方向外层循环（每次 8 行）──────────────────────────────────
 401:
-    asr  N_COUNT, N, #3
-    cmp  N_COUNT, #0
-    b.eq 301f
-
-101:
-    mov  B_ADDR,  B_ADDR_1
-    mov  A_ADDR,  A_ADDR_ORG
-
-    mov  C_M_BASE, C_N_BASE
-
     asr  M_COUNT, M, #3
     cmp  M_COUNT, #0
     b.eq 301f
 
-// ── M 方向内层循环（每次 8 行）──────────────────────────────
+400:
+    mov  A_SAVED, A_ADDR        // save A panel base for this M block
+    mov  C_N_BASE, C_ROW_BASE   // C column base for this M row
+    mov  B_N_BASE, B_ADDR        // reset B to origin for each M block
+
+101:
+    asr  N_COUNT, N, #3
+    cmp  N_COUNT, #0
+    b.eq 301f
+
+// ── N 方向内层循环（每次 8 列）──────────────────────────────────
 102:
-    mov  B_ADDR_1, B_ADDR
+    mov  A_ADDR, A_SAVED        // reset A to start of M panel
+    mov  B_ADDR_1, B_N_BASE     // B pointer for this N panel
+    mov  C_M_BASE, C_N_BASE     // C base for this (m,n) tile
 
     LOAD_C_ROWMAJOR
 
@@ -297,15 +304,17 @@ _i8gemm_k:
 
     STORE_C_ROWMAJOR
 
-    add  C_M_BASE, C_M_BASE, LDC_B, lsl #3
-
-    subs M_COUNT, M_COUNT, #1
-    b.gt 102b
-
-    add  C_N_BASE, C_N_BASE, #32
+    add  C_N_BASE, C_N_BASE, #32          // next N column in C
+    add  B_N_BASE, B_N_BASE, K_STRIDE     // next N panel in B
 
     subs N_COUNT, N_COUNT, #1
-    b.gt 101b
+    b.gt 102b
+
+    add  A_ADDR, A_SAVED, K_STRIDE         // advance A to next M panel
+    add  C_ROW_BASE, C_ROW_BASE, LDC_B, lsl #3  // advance C to next M row
+
+    subs M_COUNT, M_COUNT, #1
+    b.gt 400b
 
 301:
     RESTORE

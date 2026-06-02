@@ -8,10 +8,10 @@
 //#include "sme_matrix.h"
 typedef int32_t MatrixType;
 typedef int8_t DFMatrixType;
-typedef u_int8_t BMatrixType;
+typedef int8_t BMatrixType;
 #define MATRIX_EPSILON 1e-5
 
-void i8gemm_k(const DFMatrixType *A, const BMatrixType *B, MatrixType *C, int m, int k, int n, int ldc);
+void i8gemm_k(const DFMatrixType *A, const BMatrixType *B, MatrixType *C, int m, int k, int n, int8_t *A_reorder);
 
 static double get_time(struct timespec *start,
     struct timespec *end)
@@ -26,10 +26,7 @@ DFMatrixType* dfmatrix_generate(int rows, int cols) {
     
     for (int i = 0; i < rows; i++) {
         for (int j = 0; j < cols; j++) {
-            //matrix[i * cols + j] = (MatrixType)rand() / RAND_MAX;
-            // matrix[i * cols + j] = (j + 1) * (i + 1);
-            matrix[i * cols + j] = i;
-            // matrix[i * cols + j] = 0;
+            matrix[i * cols + j] = (DFMatrixType)(rand() % 256 - 128);
         }
     }
     return matrix;
@@ -37,13 +34,10 @@ DFMatrixType* dfmatrix_generate(int rows, int cols) {
 BMatrixType* bmatrix_generate(int rows, int cols) {
     BMatrixType* matrix = (BMatrixType*)malloc(rows * cols * sizeof(BMatrixType));
     if (!matrix) exit(EXIT_FAILURE);
-    
+
     for (int i = 0; i < rows; i++) {
         for (int j = 0; j < cols; j++) {
-            //matrix[i * cols + j] = (MatrixType)rand() / RAND_MAX;
-            // matrix[i * cols + j] = (j + 1) * (i + 1);
-            matrix[i * cols + j] = j;
-            // matrix[i * cols + j] = 0;
+            matrix[i * cols + j] = (BMatrixType)(rand() % 256);
         }
     }
     return matrix;
@@ -249,12 +243,12 @@ int main(int argc, char* argv[]) {
     printf("%d , %d, %d \n ", m ,k ,n);
     // 转换并验证参数
     // 生成矩阵
+    srand(time(NULL));
     DFMatrixType* A = dfmatrix_generate(m, k);
     BMatrixType* B = bmatrix_generate(k, n);
     MatrixType* C = zero_generate(m, n);  // 带初始值的C矩阵
-    int8_t* A_reordered = malloc(m * k);
+    int8_t* A_reordered = malloc(m * k);  // 由内核填充的 A 重排 buffer
     BMatrixType* B_reordered = malloc(k * n);
-    reorder_A_1x8(A, A_reordered, m, k);
     reorder_B_8x1(B, B_reordered, k, n);
     // 保留原始C的副本用于验证
     MatrixType* C_orig = (MatrixType*)malloc(m*n * sizeof(MatrixType));
@@ -271,7 +265,7 @@ int main(int argc, char* argv[]) {
     // }
     clock_gettime(CLOCK_MONOTONIC_RAW, &start);
     for (int i = 0; i < looptime; i++) {
-        i8gemm_k(A_reordered, B_reordered, C, m, k, n, n);
+        i8gemm_k(A, B_reordered, C, m, k, n, A_reordered);
     }
     clock_gettime(CLOCK_MONOTONIC_RAW, &end);
     time_used = get_time(&start, &end);
