@@ -25,7 +25,11 @@
 
 .text
 .align 4
+#ifdef __APPLE__
 .global _i8gemm_k_ld
+#else
+.global i8gemm_k_ld
+#endif
 
 #define A_ORIG      x0
 #define B_ADDR      x1
@@ -393,14 +397,24 @@
 
 // ==================== 主入口 ====================
 
+#ifdef __APPLE__
 _i8gemm_k_ld:
+#else
+i8gemm_k_ld:
+#endif
     INIT
 
     // ── 从栈加载 ldb, ldc ──
-    // INIT 保存了 10 个 stp pair（160 bytes），栈参数位于 sp+160, sp+164
-    // macOS ARM64 packs 32-bit stack args at 4-byte (not 8-byte) intervals
+    // INIT 保存了 10 个 stp pair（160 bytes）
+#ifdef __APPLE__
+    // macOS ARM64: 32-bit stack args packed at 4-byte intervals
     ldr  w8,  [sp, #160]         // ldb → w8 (zero-extends to x8 = LDB)
     ldr  w12, [sp, #164]         // ldc → w12 (temp)
+#else
+    // Linux AAPCS64: 每个栈参数占 8 字节（64-bit aligned）
+    ldr  w8,  [sp, #160]         // ldb → w8 (zero-extends to x8 = LDB)
+    ldr  w12, [sp, #168]         // ldc → w12 (temp)
+#endif
     lsl  LDC_B, x12, #2          // LDC_B = ldc * 4 (bytes)
 
     // LDA 已在 x7，无需加载
