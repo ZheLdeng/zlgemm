@@ -5,6 +5,9 @@ calculate_ldc
 calculate_pack_test
 bench_lda
 bench_lda_cmp
+test_correctness
+bench_perf
+*.o
 
 # Logs
 *.log
