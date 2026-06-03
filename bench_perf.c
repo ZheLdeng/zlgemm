@@ -1,14 +1,17 @@
 // bench_perf.c
 // Unified benchmark: peak instruction throughput (bfmmla/smmla) +
-// shape.csv performance test + efficiency ranking.
+// shape.csv single-thread test + multi-threaded BF16 GEMM test.
 //
 // Build:
-//   cc -o bench_perf bench_perf.c \
-//      i8gemm_k.S bf16gemm_k.S \
-//      -march=armv8.6-a+bf16+i8mm -O2 -Wall -lm
+//   cc -o bench_perf bench_perf.c bf16gemm_mt.c
+//      i8gemm_k.S bf16gemm_k.S
+//      -march=armv8.6-a+bf16+i8mm -O2 -Wall -fopenmp -lm
 //
 // Usage:
-//   ./bench_perf [shape.csv]  (default: shape.csv)
+//   ./bench_perf [shape.csv]                  single-thread shape bench (default)
+//   ./bench_perf --mt M K N [nthreads]        multi-threaded BF16 GEMM bench
+//   ./bench_perf --mt-i8 M K N [nthreads]     multi-threaded I8 GEMM bench
+//   ./bench_perf --mt-both M K N [nthreads]   multi-threaded BF16+I8 GEMM bench
 //
 // Output (sorted by efficiency descending):
 //   M K N  bf16_eff%  bf16_GFLOPS  i8_eff%  i8_GOPS
@@ -19,6 +22,7 @@
 #include <stdint.h>
 #include <assert.h>
 #include <math.h>
+#include <omp.h>
 
 // ═══════════════════════════════════════════════════════════════════════
 // Timing
@@ -247,6 +251,12 @@ static void bf16_pack_B(const BF16_Type* B, BF16_Type* B_reo, int K, int N) {
         }
 }
 
+// ── Multi-threaded BF16 GEMM (from bf16gemm_mt.c) ──
+void bf16_pack_B(const BF16_Type *B, BF16_Type *B_reo, int K, int N);
+void bf16gemm_mt_dispatch(const BF16_Type *A, const BF16_Type *B_reo,
+                           BF16_Accum *C, int M, int K_r, int N_r,
+                           int num_threads);
+
 static void bf16_dispatch(const BF16_Type *A, const BF16_Type *B_reo,
                            BF16_Accum *C, int m, int k, int n,
                            BF16_Type *A_reorder) {
@@ -340,6 +350,12 @@ static void i8_dispatch(const I8_Type *A, const I8_Type *B_reo,
     if (m_rem >= 1)
         i8gemm_k_ld1(At, B_reo, Ct, 1, k, n, A_reo_t, lda, ldb, ldc);
 }
+
+// ── Multi-threaded I8 GEMM (from i8gemm_mt.c) ──
+// Declared after static i8_pack_B/i8_dispatch to avoid redeclaration conflict
+void i8gemm_mt_dispatch(const I8_Type *A, const I8_Type *B_reo,
+                         I8_Accum *C, int M, int K_r, int N_r,
+                         int num_threads);
 
 // ═══════════════════════════════════════════════════════════════════════
 // Auto-tune loops for benchmark
@@ -439,7 +455,285 @@ static int cmp_eff_desc(const void *a, const void *b) {
 // ═══════════════════════════════════════════════════════════════════════
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// Multi-threaded BF16 GEMM benchmark (--mt mode)
+// ═══════════════════════════════════════════════════════════════════════
+static void bench_mt(int M, int K, int N, int num_threads) {
+    int K_r = ((K + 7) / 8) * 8;   if (K_r < 8)  K_r = 8;
+    int N_r = ((N + 7) / 8) * 8;   if (N_r < 8)  N_r = 8;
+
+    const char *strategy = (M / 8 >= num_threads) ? "M-tiling" : "N-tiling";
+
+    printf("# ═══ BF16 GEMM Multi-threaded ═══\n");
+    printf("# Shape: M=%d K=%d N=%d  (K_r=%d N_r=%d)\n", M, K, N, K_r, N_r);
+    printf("# Threads: %d  Strategy: %s\n", num_threads, strategy);
+    printf("#\n");
+
+    srand(42);
+    BF16_Type *A = (BF16_Type*)malloc((size_t)M * K_r * sizeof(BF16_Type));
+    BF16_Type *B = (BF16_Type*)malloc((size_t)K_r * N_r * sizeof(BF16_Type));
+    BF16_Type *B_reo = (BF16_Type*)aligned_alloc(64,
+        (size_t)K_r * N_r * sizeof(BF16_Type));
+    BF16_Accum *C = (BF16_Accum*)calloc((size_t)M * N_r, sizeof(BF16_Accum));
+    if (!A || !B || !B_reo || !C) {
+        fprintf(stderr, "Alloc failed\n"); goto cleanup;
+    }
+
+    for (int i = 0; i < M * K_r; i++)
+        A[i] = float_to_bf16(((float)rand() / RAND_MAX) * 2.0f - 1.0f);
+    for (int i = 0; i < K_r * N_r; i++)
+        B[i] = float_to_bf16(((float)rand() / RAND_MAX) * 2.0f - 1.0f);
+
+    // Pack B once (outside timed region)
+    bf16_pack_B(B, B_reo, K_r, N_r);
+
+    // Warmup
+    printf("# Warmup...\n");
+    for (int w = 0; w < 3; w++)
+        bf16gemm_mt_dispatch(A, B_reo, C, M, K_r, N_r, num_threads);
+
+    // Benchmark multi-threaded
+    printf("# Benchmarking...\n");
+    double flops_per_call = 2.0 * (double)M * K_r * N_r;
+    int loops = (int)(0.3 * 200e9 / flops_per_call);
+    if (loops < 1) loops = 1;
+    if (loops > 100) loops = 100;
+
+    struct timespec s, e;
+    double best_mt = 0.0;
+    int runs = 5;
+    for (int run = 0; run < runs; run++) {
+        memset(C, 0, (size_t)M * N_r * sizeof(BF16_Accum));
+        clock_gettime(CLOCK_MONOTONIC_RAW, &s);
+        for (int i = 0; i < loops; i++)
+            bf16gemm_mt_dispatch(A, B_reo, C, M, K_r, N_r, num_threads);
+        clock_gettime(CLOCK_MONOTONIC_RAW, &e);
+        double t = get_time(&s, &e);
+        if (t > 0.0) {
+            double gf = flops_per_call * loops / t * 1e-9;
+            if (gf > best_mt) best_mt = gf;
+        }
+    }
+    printf("#   Multi-threaded (%d threads, %s): %.1f GFLOPS  (loops=%d)\n",
+           num_threads, strategy, best_mt, loops);
+
+    // Compare with single-thread
+    double best_st = 0.0;
+    for (int run = 0; run < runs; run++) {
+        memset(C, 0, (size_t)M * N_r * sizeof(BF16_Accum));
+        clock_gettime(CLOCK_MONOTONIC_RAW, &s);
+        for (int i = 0; i < loops; i++)
+            bf16gemm_mt_dispatch(A, B_reo, C, M, K_r, N_r, 1);
+        clock_gettime(CLOCK_MONOTONIC_RAW, &e);
+        double t = get_time(&s, &e);
+        if (t > 0.0) {
+            double gf = flops_per_call * loops / t * 1e-9;
+            if (gf > best_st) best_st = gf;
+        }
+    }
+    printf("#   Single-thread (via mt_dispatch): %.1f GFLOPS\n", best_st);
+    if (best_st > 0.0)
+        printf("#   Speedup:                         %.2f x\n", best_mt / best_st);
+
+    // Also report single-thread via original dispatch (for reference)
+    BF16_Type *A_reo = (BF16_Type*)malloc((size_t)(M + 8) * K_r * sizeof(BF16_Type));
+    BF16_Accum *C_st2 = (BF16_Accum*)calloc((size_t)M * N_r, sizeof(BF16_Accum));
+    if (A_reo && C_st2) {
+        for (int w = 0; w < 3; w++)
+            bf16_dispatch(A, B_reo, C_st2, M, K_r, N_r, A_reo);
+        double best_orig = 0.0;
+        for (int run = 0; run < runs; run++) {
+            memset(C_st2, 0, (size_t)M * N_r * sizeof(BF16_Accum));
+            clock_gettime(CLOCK_MONOTONIC_RAW, &s);
+            for (int i = 0; i < loops; i++)
+                bf16_dispatch(A, B_reo, C_st2, M, K_r, N_r, A_reo);
+            clock_gettime(CLOCK_MONOTONIC_RAW, &e);
+            double t = get_time(&s, &e);
+            if (t > 0.0) {
+                double gf = flops_per_call * loops / t * 1e-9;
+                if (gf > best_orig) best_orig = gf;
+            }
+        }
+        printf("#   Single-thread (orig dispatch):   %.1f GFLOPS\n", best_orig);
+    }
+    free(A_reo); free(C_st2);
+
+cleanup:
+    free(A); free(B); free(B_reo); free(C);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Multi-threaded I8 GEMM benchmark (--mt-i8 mode)
+// ═══════════════════════════════════════════════════════════════════════
+static void bench_mt_i8(int M, int K, int N, int num_threads) {
+    int K_r = ((K + 15) / 16) * 16;  if (K_r < 16) K_r = 16;
+    int N_r = ((N + 7)  / 8)  * 8;   if (N_r < 8)   N_r = 8;
+
+    const char *strategy = (M / 8 >= num_threads) ? "M-tiling" : "N-tiling";
+
+    printf("# ═══ I8 GEMM Multi-threaded ═══\n");
+    printf("# Shape: M=%d K=%d N=%d  (K_r=%d N_r=%d)\n", M, K, N, K_r, N_r);
+    printf("# Threads: %d  Strategy: %s\n", num_threads, strategy);
+    printf("#\n");
+
+    srand(42);
+    I8_Type *A = (I8_Type*)malloc((size_t)M * K_r * sizeof(I8_Type));
+    I8_Type *B = (I8_Type*)malloc((size_t)K_r * N_r * sizeof(I8_Type));
+    I8_Type *B_reo = (I8_Type*)aligned_alloc(64,
+        (size_t)K_r * N_r * sizeof(I8_Type));
+    I8_Accum *C = (I8_Accum*)calloc((size_t)M * N_r, sizeof(I8_Accum));
+    if (!A || !B || !B_reo || !C) {
+        fprintf(stderr, "Alloc failed\n"); goto cleanup;
+    }
+
+    for (int i = 0; i < M * K_r; i++)
+        A[i] = (I8_Type)(rand() % 256 - 128);
+    for (int i = 0; i < K_r * N_r; i++)
+        B[i] = (I8_Type)(rand() % 256);
+
+    // Pack B once (outside timed region)
+    i8_pack_B(B, B_reo, K_r, N_r);
+
+    // Warmup
+    printf("# Warmup...\n");
+    for (int w = 0; w < 3; w++)
+        i8gemm_mt_dispatch(A, B_reo, C, M, K_r, N_r, num_threads);
+
+    // Benchmark multi-threaded
+    printf("# Benchmarking...\n");
+    double ops_per_call  = 2.0 * (double)M * K_r * N_r;
+    double peak_gops = 331.6;  // approximate peak for timing estimate
+    int loops = (int)(0.3 * peak_gops * 1e9 / ops_per_call);
+    if (loops < 1) loops = 1;
+    if (loops > 500) loops = 500;
+
+    struct timespec s, e;
+    double best_mt = 0.0;
+    int runs = 5;
+    for (int run = 0; run < runs; run++) {
+        memset(C, 0, (size_t)M * N_r * sizeof(I8_Accum));
+        clock_gettime(CLOCK_MONOTONIC_RAW, &s);
+        for (int i = 0; i < loops; i++)
+            i8gemm_mt_dispatch(A, B_reo, C, M, K_r, N_r, num_threads);
+        clock_gettime(CLOCK_MONOTONIC_RAW, &e);
+        double t = get_time(&s, &e);
+        if (t > 0.0) {
+            double go = ops_per_call * loops / t * 1e-9;
+            if (go > best_mt) best_mt = go;
+        }
+    }
+    printf("#   Multi-threaded (%d threads, %s): %.1f GOPS  (loops=%d)\n",
+           num_threads, strategy, best_mt, loops);
+
+    // Single-thread reference (via mt_dispatch)
+    double best_st = 0.0;
+    for (int run = 0; run < runs; run++) {
+        memset(C, 0, (size_t)M * N_r * sizeof(I8_Accum));
+        clock_gettime(CLOCK_MONOTONIC_RAW, &s);
+        for (int i = 0; i < loops; i++)
+            i8gemm_mt_dispatch(A, B_reo, C, M, K_r, N_r, 1);
+        clock_gettime(CLOCK_MONOTONIC_RAW, &e);
+        double t = get_time(&s, &e);
+        if (t > 0.0) {
+            double go = ops_per_call * loops / t * 1e-9;
+            if (go > best_st) best_st = go;
+        }
+    }
+    printf("#   Single-thread (via mt_dispatch): %.1f GOPS\n", best_st);
+    if (best_st > 0.0)
+        printf("#   Speedup:                         %.2f x\n", best_mt / best_st);
+
+    // Single-thread via original dispatch (for cross-reference)
+    I8_Type *A_reo = (I8_Type*)malloc((size_t)(M + 8) * K_r * sizeof(I8_Type));
+    I8_Accum *C_st2 = (I8_Accum*)calloc((size_t)M * N_r, sizeof(I8_Accum));
+    if (A_reo && C_st2) {
+        for (int w = 0; w < 3; w++)
+            i8_dispatch(A, B_reo, C_st2, M, K_r, N_r, A_reo);
+        double best_orig = 0.0;
+        for (int run = 0; run < runs; run++) {
+            memset(C_st2, 0, (size_t)M * N_r * sizeof(I8_Accum));
+            clock_gettime(CLOCK_MONOTONIC_RAW, &s);
+            for (int i = 0; i < loops; i++)
+                i8_dispatch(A, B_reo, C_st2, M, K_r, N_r, A_reo);
+            clock_gettime(CLOCK_MONOTONIC_RAW, &e);
+            double t = get_time(&s, &e);
+            if (t > 0.0) {
+                double go = ops_per_call * loops / t * 1e-9;
+                if (go > best_orig) best_orig = go;
+            }
+        }
+        printf("#   Single-thread (orig dispatch):   %.1f GOPS\n", best_orig);
+    }
+    free(A_reo); free(C_st2);
+
+cleanup:
+    free(A); free(B); free(B_reo); free(C);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Multi-threaded BF16 + I8 GEMM benchmark (--mt-both mode)
+// ═══════════════════════════════════════════════════════════════════════
+static void bench_mt_both(int M, int K, int N, int num_threads) {
+    printf("# ══════════════════════════════════════════════════════\n");
+    printf("#  Multi-threaded BF16 + I8 GEMM\n");
+    printf("#  Shape: M=%d K=%d N=%d  Threads: %d\n", M, K, N, num_threads);
+    printf("# ══════════════════════════════════════════════════════\n\n");
+
+    bench_mt(M, K, N, num_threads);
+    printf("\n");
+    bench_mt_i8(M, K, N, num_threads);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// MAIN
+// ═══════════════════════════════════════════════════════════════════════
 int main(int argc, char *argv[]) {
+    // ── Multi-threaded modes ──
+    if (argc >= 2 && strcmp(argv[1], "--mt") == 0) {
+        if (argc < 5) {
+            fprintf(stderr, "Usage: %s --mt M K N [nthreads]\n", argv[0]);
+            return 1;
+        }
+        int M = atoi(argv[2]), K = atoi(argv[3]), N = atoi(argv[4]);
+        int nthreads = (argc >= 6) ? atoi(argv[5]) : omp_get_max_threads();
+        if (M <= 0 || K <= 0 || N <= 0 || nthreads <= 0) {
+            fprintf(stderr, "Invalid arguments\n");
+            return 1;
+        }
+        bench_mt(M, K, N, nthreads);
+        return 0;
+    }
+
+    if (argc >= 2 && strcmp(argv[1], "--mt-i8") == 0) {
+        if (argc < 5) {
+            fprintf(stderr, "Usage: %s --mt-i8 M K N [nthreads]\n", argv[0]);
+            return 1;
+        }
+        int M = atoi(argv[2]), K = atoi(argv[3]), N = atoi(argv[4]);
+        int nthreads = (argc >= 6) ? atoi(argv[5]) : omp_get_max_threads();
+        if (M <= 0 || K <= 0 || N <= 0 || nthreads <= 0) {
+            fprintf(stderr, "Invalid arguments\n");
+            return 1;
+        }
+        bench_mt_i8(M, K, N, nthreads);
+        return 0;
+    }
+
+    if (argc >= 2 && strcmp(argv[1], "--mt-both") == 0) {
+        if (argc < 5) {
+            fprintf(stderr, "Usage: %s --mt-both M K N [nthreads]\n", argv[0]);
+            return 1;
+        }
+        int M = atoi(argv[2]), K = atoi(argv[3]), N = atoi(argv[4]);
+        int nthreads = (argc >= 6) ? atoi(argv[5]) : omp_get_max_threads();
+        if (M <= 0 || K <= 0 || N <= 0 || nthreads <= 0) {
+            fprintf(stderr, "Invalid arguments\n");
+            return 1;
+        }
+        bench_mt_both(M, K, N, nthreads);
+        return 0;
+    }
+
     const char *csv_path = (argc >= 2) ? argv[1] : "shape.csv";
 
     // ── 1. Measure peak throughput ──

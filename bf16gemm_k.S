@@ -37,6 +37,8 @@
 #define N           x5
 #define A_REORDER   x6
 #define LDA_B       x7    // A row stride in bytes (= lda * 2, computed in init)
+#define LDC_B       x9    // C row stride in bytes = ldc * 4
+#define LDB         x8    // K_big of packed B (loaded from stack)
 
 #define N_COUNT     x30
 #define C_N_BASE    x27
@@ -49,10 +51,37 @@
 #define C_M_BASE    x26
 #define A_REORDER_M x28   // 当前 M block 在 A_reorder 中的基地址
 #define A_ADDR      x29   // A 加载指针（指向 orig A 或 reorder buffer）
-#define A_ORIG_M    x20   // 当前 M block 在原始 A 中的基地址
+#define A_ORIG_M    x20 
+// ── M_LOOP 宏：m=8 用真循环，m=1/2/4 用空宏 ──────────────────────
+	.macro M_LOOP_BEGIN_1
+	.endm
+	.macro M_LOOP_BEGIN_2
+	.endm
+	.macro M_LOOP_BEGIN_4
+	.endm
+	.macro M_LOOP_BEGIN_8
+	asr  M_COUNT, M, #3
+	cmp  M_COUNT, #0
+	b.eq 301f
+400:
+	.endm
 
-#define LDC_B       x9    // C row stride in bytes = ldc * 4
-#define LDB         x8    // K_big of packed B (loaded from stack)
+	.macro M_LOOP_END_1
+	.endm
+	.macro M_LOOP_END_2
+	.endm
+	.macro M_LOOP_END_4
+	.endm
+	.macro M_LOOP_END_8
+	add  A_ORIG_M, A_ORIG_M, LDA_B, lsl 3
+	add  C_ROW_BASE, C_ROW_BASE, LDC_B, lsl 3
+	subs M_COUNT, M_COUNT, #1
+	b.gt 400b
+301:
+	.endm
+
+  // 当前 M block 在原始 A 中的基地址
+
 
 // ── INIT / RESTORE ────────────────────────────────────────────
 	.macro INIT
@@ -79,6 +108,33 @@
 	ldp x23, x24, [sp], #16
 	ldp x21, x22, [sp], #16
 	ldp x19, x20, [sp], #16
+	.endm
+
+// ── LOAD_C_ROWMAJOR_B：从 bf16 C 加载 8×8 → blocked v9~v24 ──
+	.macro LOAD_C_ROWMAJOR_B
+	add  x11, C_M_BASE, LDC_B
+	add  x12, C_M_BASE, LDC_B, lsl #1
+	add  x14, C_M_BASE, LDC_B, lsl #2
+	sub  x13, x14, LDC_B
+	add  x15, x11, LDC_B, lsl #2
+	add  x16, x12, LDC_B, lsl #2
+	add  x17, x15, LDC_B, lsl #1
+	ldr  q0, [C_M_BASE]; shll  v2.4s, v0.4h, #16; shll2 v3.4s, v0.8h, #16
+	ldr  q0, [x11];       shll  v4.4s, v0.4h, #16; shll2 v5.4s, v0.8h, #16
+	zip1 v9.2d,  v2.2d, v4.2d; zip2 v10.2d, v2.2d, v4.2d
+	zip1 v11.2d, v3.2d, v5.2d; zip2 v12.2d, v3.2d, v5.2d
+	ldr  q0, [x12];       shll  v2.4s, v0.4h, #16; shll2 v3.4s, v0.8h, #16
+	ldr  q0, [x13];       shll  v4.4s, v0.4h, #16; shll2 v5.4s, v0.8h, #16
+	zip1 v13.2d, v2.2d, v4.2d; zip2 v14.2d, v2.2d, v4.2d
+	zip1 v15.2d, v3.2d, v5.2d; zip2 v16.2d, v3.2d, v5.2d
+	ldr  q0, [x14];       shll  v2.4s, v0.4h, #16; shll2 v3.4s, v0.8h, #16
+	ldr  q0, [x15];       shll  v4.4s, v0.4h, #16; shll2 v5.4s, v0.8h, #16
+	zip1 v17.2d, v2.2d, v4.2d; zip2 v18.2d, v2.2d, v4.2d
+	zip1 v19.2d, v3.2d, v5.2d; zip2 v20.2d, v3.2d, v5.2d
+	ldr  q0, [x16];       shll  v2.4s, v0.4h, #16; shll2 v3.4s, v0.8h, #16
+	ldr  q0, [x17];       shll  v4.4s, v0.4h, #16; shll2 v5.4s, v0.8h, #16
+	zip1 v21.2d, v2.2d, v4.2d; zip2 v22.2d, v2.2d, v4.2d
+	zip1 v23.2d, v3.2d, v5.2d; zip2 v24.2d, v3.2d, v5.2d
 	.endm
 
 // ── LOAD_C_ROWMAJOR：从行主序 C 加载 8×8 float32 → blocked v9~v24 ──
@@ -165,6 +221,62 @@
 	stp  q30, q31, [x17]
 	.endm
 
+// ── STORE_C_ROWMAJOR_B：f32→bf16 转换后存储，每行 16 bytes ──────
+	.macro STORE_C_ROWMAJOR_B
+	zip1 v0.2d, v9.2d,  v10.2d
+	zip1 v1.2d, v11.2d, v12.2d
+	zip2 v2.2d, v9.2d,  v10.2d
+	zip2 v3.2d, v11.2d, v12.2d
+	bfcvtn  v0.4h, v0.4s
+	bfcvtn2 v0.8h, v1.4s
+	bfcvtn  v1.4h, v2.4s
+	bfcvtn2 v1.8h, v3.4s
+
+	zip1 v4.2d, v13.2d, v14.2d
+	zip1 v5.2d, v15.2d, v16.2d
+	zip2 v6.2d, v13.2d, v14.2d
+	zip2 v7.2d, v15.2d, v16.2d
+	bfcvtn  v2.4h, v4.4s
+	bfcvtn2 v2.8h, v5.4s
+	bfcvtn  v3.4h, v6.4s
+	bfcvtn2 v3.8h, v7.4s
+
+	zip1 v8.2d, v17.2d, v18.2d
+	zip1 v25.2d, v19.2d, v20.2d
+	zip2 v26.2d, v17.2d, v18.2d
+	zip2 v27.2d, v19.2d, v20.2d
+	bfcvtn  v4.4h, v8.4s
+	bfcvtn2 v4.8h, v25.4s
+	bfcvtn  v5.4h, v26.4s
+	bfcvtn2 v5.8h, v27.4s
+
+	zip1 v28.2d, v21.2d, v22.2d
+	zip1 v29.2d, v23.2d, v24.2d
+	zip2 v30.2d, v21.2d, v22.2d
+	zip2 v31.2d, v23.2d, v24.2d
+	bfcvtn  v6.4h, v28.4s
+	bfcvtn2 v6.8h, v29.4s
+	bfcvtn  v7.4h, v30.4s
+	bfcvtn2 v7.8h, v31.4s
+
+	add  x11, C_M_BASE, LDC_B
+	add  x12, C_M_BASE, LDC_B, lsl #1
+	add  x14, C_M_BASE, LDC_B, lsl #2
+	sub  x13, x14, LDC_B
+	add  x15, x11, LDC_B, lsl #2
+	add  x16, x12, LDC_B, lsl #2
+	add  x17, x15, LDC_B, lsl #1
+
+	str  q0, [C_M_BASE]
+	str  q1, [x11]
+	str  q2, [x12]
+	str  q3, [x13]
+	str  q4, [x14]
+	str  q5, [x15]
+	str  q6, [x16]
+	str  q7, [x17]
+	.endm
+
 // ==================== CACHED PATH MACROS ====================
 // 从 A_reorder 连续读取 A（后续 N iteration 使用）
 //
@@ -175,14 +287,14 @@
 //   v4 = B[k:k+4][0:2], v5 = B[k:k+4][2:4]
 //   v6 = B[k:k+4][4:6], v7 = B[k:k+4][6:8]
 
-	.macro LOAD_A0_B0
+	.macro LOAD_A0_B0_8
 	ldp q0, q1, [A_ADDR], #32
 	ldp q2, q3, [A_ADDR], #32
 	ldp q4, q5, [B_ADDR_1], #32
 	ldp q6, q7, [B_ADDR_1], #32
 	.endm
 
-	.macro COMPUTE_A1_B1
+	.macro COMPUTE_A1_B1_8
 	// Load next A and B (prefetch)
 	ldp q8,  q25, [A_ADDR], #32
 	ldp q26, q27, [A_ADDR], #32
@@ -211,7 +323,7 @@
 	bfmmla v24.4s, v3.8h, v7.8h
 	.endm
 
-	.macro COMPUTE_A2_B2
+	.macro COMPUTE_A2_B2_8
 	// Load next A and B (prefetch)
 	ldp q0, q1, [A_ADDR], #32
 	ldp q2, q3, [A_ADDR], #32
@@ -240,7 +352,7 @@
 	bfmmla v24.4s, v27.8h, v31.8h
 	.endm
 
-	.macro COMPUTE_A3_B3
+	.macro COMPUTE_A3_B3_8
 	// Compute with last A,B pair (no prefetch)
 	bfmmla v9.4s,  v8.8h, v28.8h
 	bfmmla v10.4s, v8.8h, v29.8h
@@ -267,7 +379,7 @@
 // 从原始 A 跨 stride (LDA_B) 读取，写入 A_reorder（首个 N iteration 使用）
 // A 每行加载 4 bf16 = 8 bytes → 8 行 = 64 bytes = 4 NEON regs
 
-	.macro LOAD_A0_B0_STRIDED
+	.macro LOAD_A0_B0_STRIDED_8
 	// ── 从原始 A 跨 stride 加载 A0 → v0-v3 ──
 	// 预计算 8 个行地址，row 0 直接用 A_ADDR，最大深度 3
 	add  x11, A_ADDR, LDA_B                // 1*LDA
@@ -301,7 +413,7 @@
 	ldp  q6, q7, [B_ADDR_1], #32
 	.endm
 
-	.macro COMPUTE_A1_B1_STRIDED
+	.macro COMPUTE_A1_B1_STRIDED_8
 	// ── 从原始 A 跨 stride 加载 A1 → v8, v25-v27 ──
 	add  x11, A_ADDR, LDA_B                // 1*LDA
 	add  x12, A_ADDR, LDA_B, lsl #1        // 2*LDA
@@ -353,7 +465,7 @@
 	bfmmla v24.4s, v3.8h, v7.8h
 	.endm
 
-	.macro COMPUTE_A2_B2_STRIDED
+	.macro COMPUTE_A2_B2_STRIDED_8
 	// ── 从原始 A 跨 stride 加载 A2 → v0-v3 ──
 	add  x11, A_ADDR, LDA_B                // 1*LDA
 	add  x12, A_ADDR, LDA_B, lsl #1        // 2*LDA
@@ -405,164 +517,131 @@
 	bfmmla v24.4s, v27.8h, v31.8h
 	.endm
 
-// ==================== 主入口 ====================
+.macro GEMM_BODY func_name, mrows, cmpsfx, load_c, store_c, ldc_shift, c_adv
 
 #ifdef __APPLE__
-_bf16gemm_k_ld:
+	.global _\func_name
+_\func_name:
 #else
-bf16gemm_k_ld:
+	.global \func_name
+\func_name:
 #endif
 	INIT
 
-	// ── 从栈加载 ldb, ldc ──
-	// INIT 保存了 10 个 stp pair（160 bytes）
 #ifdef __APPLE__
-	// macOS ARM64: 32-bit stack args packed at 4-byte intervals
-	ldr  w8,  [sp, #160]         // ldb → w8 (zero-extends to x8 = LDB)
-	ldr  w12, [sp, #164]         // ldc → w12 (temp)
+	ldr  w8,  [sp, #160]
+	ldr  w12, [sp, #164]
 #else
-	// Linux AAPCS64: 每个栈参数占 8 字节（64-bit aligned）
-	ldr  w8,  [sp, #160]         // ldb → w8 (zero-extends to x8 = LDB)
-	ldr  w12, [sp, #168]         // ldc → w12 (temp)
+	ldr  w8,  [sp, #160]
+	ldr  w12, [sp, #168]
 #endif
-	lsl  LDC_B, x12, #2          // LDC_B = ldc * 4 (bytes per float32 row)
+	lsl  LDC_B, x12, #\ldc_shift
 
-	// ── 将 LDA 从 element count 转换为 byte stride ──
-	// lda 参数为 bf16 element 数，每 element 2 bytes
 	lsl  LDA_B, LDA_B, #1        // LDA_B = lda * 2 (bytes)
 
-	mov  A_ORIG_M, A_ORIG       // A_ORIG_M: 原始 A 中当前 M block 的基地址
-	mov  C_ROW_BASE, C_ADDR_0   // C row base walks forward through M rows
+	mov  A_ORIG_M, A_ORIG
+	mov  C_ROW_BASE, C_ADDR_0
 
-// ── M 方向外层循环（每次 8 行）──────────────────────────────────
-401:
-	asr  M_COUNT, M, #3
-	cmp  M_COUNT, #0
-	b.eq 301f
+	M_LOOP_BEGIN_\mrows
 
-400:
-	// 每个 M block 的初始化
-	mov  A_REORDER_M, A_REORDER  // 记录此 M block 在 A_reorder 中的起始位置
-	mov  FIRST_N, #1             // 标记为首个 N iteration
-	mov  C_N_BASE, C_ROW_BASE    // C column base for this M row
-	mov  B_N_BASE, B_ADDR        // reset B to origin for each M block
+	mov  A_REORDER_M, A_REORDER
+	mov  FIRST_N, #1
+	mov  C_N_BASE, C_ROW_BASE
+	mov  B_N_BASE, B_ADDR
 
-	// ── N 方向内层循环（每次 8 列）──────────────────────────────
+.L\func_name\()_n_loop:
 	asr  N_COUNT, N, #3
 	cmp  N_COUNT, #0
-	b.eq 301f
+	b.eq .L\func_name\()_end
 
-102:
-	mov  B_ADDR_1, B_N_BASE      // B pointer for this N panel
-	mov  C_M_BASE, C_N_BASE      // C base for this (m,n) tile
+.L\func_name\()_n_iter:
+	mov  B_ADDR_1, B_N_BASE
+	mov  C_M_BASE, C_N_BASE
 
-	// ── 判断是否首个 N iteration ──
 	cmp  FIRST_N, #1
-	b.eq 801f                     // 首个 N: 走 strided 路径
+	b.eq .L\func_name\()_strided
 
-// ==================== CACHED PATH ====================
-	// 从 A_reorder 连续读取（后续 N iteration）
-	mov  A_ADDR, A_REORDER_M     // A_ADDR = 此 M block 在 reorder 中的起始
+// ── CACHED PATH ───────────────────────────────────────────────────
+	mov  A_ADDR, A_REORDER_M
 
-	LOAD_C_ROWMAJOR
+	\load_c
 
-	asr  K_COUNT, K, #3          // K/8 iterations (each processes 2×K_unroll=4)
+	asr  K_COUNT, K, #3
 	cmp  K_COUNT, #0
-	b.eq 301f
+	b.eq .L\func_name\()_end
 	subs K_COUNT, K_COUNT, #1
-	LOAD_A0_B0
-	b.eq 202f
 
-201:
-	COMPUTE_A1_B1
-	COMPUTE_A2_B2
+	LOAD_A0_B0_\cmpsfx
+
+	b.eq .L\func_name\()_cached_tail
+
+.L\func_name\()_cached_loop:
+	COMPUTE_A1_B1_\cmpsfx
+	COMPUTE_A2_B2_\cmpsfx
 	subs K_COUNT, K_COUNT, #1
-	b.gt 201b
-202:
-	COMPUTE_A1_B1
-	COMPUTE_A3_B3
+	b.gt .L\func_name\()_cached_loop
 
-	b 902f                        // 跳过 strided 路径
+.L\func_name\()_cached_tail:
+	COMPUTE_A1_B1_\cmpsfx
+	COMPUTE_A3_B3_\cmpsfx
 
-// ==================== STRIDED PATH ====================
-801:
-	// 从原始 A 跨 stride (LDA_B) 读取，写入 A_reorder（首个 N iteration）
-	mov  A_ADDR, A_ORIG_M        // A_ADDR = 此 M block 在原始 A 中的起始
+	b .L\func_name\()_epilogue
 
-	LOAD_C_ROWMAJOR
+// ── STRIDED PATH ──────────────────────────────────────────────────
+.L\func_name\()_strided:
+	mov  A_ADDR, A_ORIG_M
 
-	asr  K_COUNT, K, #3          // K/8 iterations
+	\load_c
+
+	asr  K_COUNT, K, #3
 	cmp  K_COUNT, #0
-	b.eq 301f
+	b.eq .L\func_name\()_end
 	subs K_COUNT, K_COUNT, #1
-	LOAD_A0_B0_STRIDED
-	b.eq 812f
 
-811:
-	COMPUTE_A1_B1_STRIDED
-	COMPUTE_A2_B2_STRIDED
+	LOAD_A0_B0_STRIDED_\mrows
+
+	b.eq .L\func_name\()_strided_tail
+
+.L\func_name\()_strided_loop:
+	COMPUTE_A1_B1_STRIDED_\mrows
+	COMPUTE_A2_B2_STRIDED_\mrows
 	subs K_COUNT, K_COUNT, #1
-	b.gt 811b
-812:
-	COMPUTE_A1_B1_STRIDED
-	COMPUTE_A3_B3
+	b.gt .L\func_name\()_strided_loop
 
-	mov  FIRST_N, #0              // 清除首 N 标记
+.L\func_name\()_strided_tail:
+	COMPUTE_A1_B1_STRIDED_\mrows
+	COMPUTE_A3_B3_\cmpsfx
 
-// ==================== COMMON EPILOGUE ====================
-902:
-	STORE_C_ROWMAJOR
+	mov  FIRST_N, #0
 
-	add  C_N_BASE, C_N_BASE, #32                    // next N column in C (8 float32 = 32 bytes)
-	add  B_N_BASE, B_N_BASE, LDB, lsl #4            // next N panel in B: += ldb * 16
+// ── EPILOGUE ──────────────────────────────────────────────────────
+.L\func_name\()_epilogue:
+	\store_c
+	add  C_N_BASE, C_N_BASE, #\c_adv
+	add  B_N_BASE, B_N_BASE, LDB, lsl #4
 
 	subs N_COUNT, N_COUNT, #1
-	b.gt 102b
+	b.gt .L\func_name\()_n_iter
 
-	// ── 前进到下一个 M block ──
-	add  A_ORIG_M, A_ORIG_M, LDA_B, lsl #3          // 原始 A: 跳过 8 行，stride = lda * 8 bytes
-	add  C_ROW_BASE, C_ROW_BASE, LDC_B, lsl #3      // C: 跳过 8 行，stride = ldc * 4 * 8 bytes
+	M_LOOP_END_\mrows
 
-	subs M_COUNT, M_COUNT, #1
-	b.gt 400b
-
-301:
+.L\func_name\()_end:
 	RESTORE
 	ret
 
-// ═══════════════════════════════════════════════════════════════
+.endm   // GEMM_BODY
+
+// ==================== 主入口 (m=8) — GEMM_BODY 宏生成 ====================
+
+// f32 store (m=8)
+GEMM_BODY bf16gemm_k_ld,   8, 8, LOAD_C_ROWMAJOR,   STORE_C_ROWMAJOR,   2, 32
+
+// bf16 store (m=8)
+GEMM_BODY bf16gemm_k_ld_b, 8, 8, LOAD_C_ROWMAJOR_B, STORE_C_ROWMAJOR_B, 1, 16
+
 // Tail kernels (m=1,2,4) — appended from bf16gemm_k_tail.S
 // Note: INIT/RESTORE macros reused from main kernel above
 // ═══════════════════════════════════════════════════════════════
-
-	.text
-	.align 4
-
-// ── 寄存器别名（与主文件一致）────────────────────────────────────
-#define A_ORIG      x0
-#define B_ADDR      x1
-#define C_ADDR_0    x2
-#define M           x3
-#define K           x4
-#define N           x5
-#define A_REORDER   x6
-#define LDA_B       x7
-
-#define N_COUNT     x30
-#define C_N_BASE    x27
-#define M_COUNT     x10
-#define B_ADDR_1    x19
-#define B_N_BASE    x22
-#define K_COUNT     x23
-#define FIRST_N     x24
-#define C_ROW_BASE  x25
-#define C_M_BASE    x26
-#define A_REORDER_M x28
-#define A_ADDR      x29
-#define A_ORIG_M    x20
-
-#define LDC_B       x9
-#define LDB         x8
 
 
 // ════════════════════════════════════════════════════════════════════
@@ -664,6 +743,62 @@ bf16gemm_k_ld:
 	stp  q4, q5, [x12]
 	stp  q6, q7, [x13]
 .endm
+
+// ── LOAD_C_B 系列：bf16→f32 转换 ─────────────────────────────────
+	.macro LOAD_C_1_B
+	ldr  q0, [C_M_BASE]; shll  v2.4s, v0.4h, #16; shll2 v3.4s, v0.8h, #16
+	movi v4.16b, #0; movi v5.16b, #0
+	zip1 v9.2d,  v2.2d, v4.2d; zip2 v10.2d, v2.2d, v4.2d
+	zip1 v11.2d, v3.2d, v5.2d; zip2 v12.2d, v3.2d, v5.2d
+	.endm
+	.macro LOAD_C_2_B
+	add  x11, C_M_BASE, LDC_B
+	ldr  q0, [C_M_BASE]; shll  v2.4s, v0.4h, #16; shll2 v3.4s, v0.8h, #16
+	ldr  q0, [x11];       shll  v4.4s, v0.4h, #16; shll2 v5.4s, v0.8h, #16
+	zip1 v9.2d,  v2.2d, v4.2d; zip2 v10.2d, v2.2d, v4.2d
+	zip1 v11.2d, v3.2d, v5.2d; zip2 v12.2d, v3.2d, v5.2d
+	.endm
+	.macro LOAD_C_4_B
+	add  x11, C_M_BASE, LDC_B; add  x12, C_M_BASE, LDC_B, lsl #1
+	add  x14, C_M_BASE, LDC_B, lsl #2; sub  x13, x14, LDC_B
+	ldr  q0, [C_M_BASE]; shll  v2.4s, v0.4h, #16; shll2 v3.4s, v0.8h, #16
+	ldr  q0, [x11];       shll  v4.4s, v0.4h, #16; shll2 v5.4s, v0.8h, #16
+	zip1 v9.2d,  v2.2d, v4.2d; zip2 v10.2d, v2.2d, v4.2d
+	zip1 v11.2d, v3.2d, v5.2d; zip2 v12.2d, v3.2d, v5.2d
+	ldr  q0, [x12];       shll  v2.4s, v0.4h, #16; shll2 v3.4s, v0.8h, #16
+	ldr  q0, [x13];       shll  v4.4s, v0.4h, #16; shll2 v5.4s, v0.8h, #16
+	zip1 v13.2d, v2.2d, v4.2d; zip2 v14.2d, v2.2d, v4.2d
+	zip1 v15.2d, v3.2d, v5.2d; zip2 v16.2d, v3.2d, v5.2d
+	.endm
+
+// ── STORE_C_B 系列：f32→bf16 转换 ─────────────────────────────────
+	.macro STORE_C_1_B
+	zip1 v0.2d, v9.2d,  v10.2d; zip1 v1.2d, v11.2d, v12.2d
+	bfcvtn  v2.4h, v0.4s; bfcvtn2 v2.8h, v1.4s
+	str  q2, [C_M_BASE]
+	.endm
+	.macro STORE_C_2_B
+	zip1 v0.2d, v9.2d,  v10.2d; zip1 v1.2d, v11.2d, v12.2d
+	zip2 v2.2d, v9.2d,  v10.2d; zip2 v3.2d, v11.2d, v12.2d
+	bfcvtn  v4.4h, v0.4s; bfcvtn2 v4.8h, v1.4s
+	bfcvtn  v5.4h, v2.4s; bfcvtn2 v5.8h, v3.4s
+	add  x11, C_M_BASE, LDC_B
+	str  q4, [C_M_BASE]; str  q5, [x11]
+	.endm
+	.macro STORE_C_4_B
+	add  x11, C_M_BASE, LDC_B; add  x12, C_M_BASE, LDC_B, lsl #1
+	add  x14, C_M_BASE, LDC_B, lsl #2; sub  x13, x14, LDC_B
+	zip1 v0.2d, v9.2d,  v10.2d; zip1 v1.2d, v11.2d, v12.2d
+	zip2 v2.2d, v9.2d,  v10.2d; zip2 v3.2d, v11.2d, v12.2d
+	zip1 v4.2d, v13.2d, v14.2d; zip1 v5.2d, v15.2d, v16.2d
+	zip2 v6.2d, v13.2d, v14.2d; zip2 v7.2d, v15.2d, v16.2d
+	bfcvtn  v25.4h, v0.4s; bfcvtn2 v25.8h, v1.4s
+	bfcvtn  v26.4h, v2.4s; bfcvtn2 v26.8h, v3.4s
+	bfcvtn  v27.4h, v4.4s; bfcvtn2 v27.8h, v5.4s
+	bfcvtn  v28.4h, v6.4s; bfcvtn2 v28.8h, v7.4s
+	str  q25, [C_M_BASE]; str  q26, [x11]
+	str  q27, [x12];      str  q28, [x13]
+	.endm
 
 // ════════════════════════════════════════════════════════════════════
 // CACHED PATH  按 mrows 特化
@@ -936,181 +1071,13 @@ bf16gemm_k_ld:
 //   \mrows     : 1 / 2 / 4
 // ════════════════════════════════════════════════════════════════════
 
-.macro GEMM_BODY func_name, mrows
 
-#ifdef __APPLE__
-.global _\func_name
-_\func_name:
-#else
-.global \func_name
-\func_name:
-#endif
-	INIT
+// f32 store
+GEMM_BODY bf16gemm_k_ld1,   1, 2, LOAD_C_1,   STORE_C_1,   2, 32
+GEMM_BODY bf16gemm_k_ld2,   2, 2, LOAD_C_2,   STORE_C_2,   2, 32
+GEMM_BODY bf16gemm_k_ld4,   4, 4, LOAD_C_4,   STORE_C_4,   2, 32
 
-#ifdef __APPLE__
-	ldr  w8,  [sp, #160]
-	ldr  w12, [sp, #164]
-#else
-	ldr  w8,  [sp, #160]
-	ldr  w12, [sp, #168]
-#endif
-	lsl  LDC_B, x12, #2
-
-	// ── 将 LDA 从 element count 转换为 byte stride ──
-	// lda 参数为 bf16 element 数，每 element 2 bytes
-	lsl  LDA_B, LDA_B, #1        // LDA_B = lda * 2 (bytes)
-
-	mov  A_ORIG_M, A_ORIG
-	mov  C_ROW_BASE, C_ADDR_0
-
-// ── 这三个尾部函数 m 固定为 \mrows，没有 M-block 外层循环 ────────
-// （调用方保证传入的 m == \mrows，直接执行单 M-block）
-
-	mov  A_REORDER_M, A_REORDER
-	mov  FIRST_N, #1
-	mov  C_N_BASE, C_ROW_BASE
-	mov  B_N_BASE, B_ADDR
-
-// ── N 循环 ────────────────────────────────────────────────────────
-.L\func_name\()_n_loop:
-	asr  N_COUNT, N, #3
-	cmp  N_COUNT, #0
-	b.eq .L\func_name\()_end
-
-.L\func_name\()_n_iter:
-	mov  B_ADDR_1, B_N_BASE
-	mov  C_M_BASE, C_N_BASE
-
-	cmp  FIRST_N, #1
-	b.eq .L\func_name\()_strided
-
-// ── CACHED PATH ───────────────────────────────────────────────────
-	mov  A_ADDR, A_REORDER_M
-
-	.if \mrows == 1
-	LOAD_C_1
-	.elseif \mrows == 2
-	LOAD_C_2
-	.else
-	LOAD_C_4
-	.endif
-
-	asr  K_COUNT, K, #3
-	cmp  K_COUNT, #0
-	b.eq .L\func_name\()_end
-	subs K_COUNT, K_COUNT, #1
-
-	.if \mrows <= 2
-	LOAD_A0_B0_2
-	.else
-	LOAD_A0_B0_4
-	.endif
-
-	b.eq .L\func_name\()_cached_tail
-
-.L\func_name\()_cached_loop:
-	.if \mrows <= 2
-	COMPUTE_A1_B1_2
-	COMPUTE_A2_B2_2
-	.else
-	COMPUTE_A1_B1_4
-	COMPUTE_A2_B2_4
-	.endif
-	subs K_COUNT, K_COUNT, #1
-	b.gt .L\func_name\()_cached_loop
-
-.L\func_name\()_cached_tail:
-	.if \mrows <= 2
-	COMPUTE_A1_B1_2
-	COMPUTE_A3_B3_2
-	.else
-	COMPUTE_A1_B1_4
-	COMPUTE_A3_B3_4
-	.endif
-
-	b .L\func_name\()_epilogue
-
-// ── STRIDED PATH ──────────────────────────────────────────────────
-.L\func_name\()_strided:
-	mov  A_ADDR, A_ORIG_M
-
-	.if \mrows == 1
-	LOAD_C_1
-	.elseif \mrows == 2
-	LOAD_C_2
-	.else
-	LOAD_C_4
-	.endif
-
-	asr  K_COUNT, K, #3
-	cmp  K_COUNT, #0
-	b.eq .L\func_name\()_end
-	subs K_COUNT, K_COUNT, #1
-
-	.if \mrows == 1
-	LOAD_A0_B0_STRIDED_1
-	.elseif \mrows == 2
-	LOAD_A0_B0_STRIDED_2
-	.else
-	LOAD_A0_B0_STRIDED_4
-	.endif
-
-	b.eq .L\func_name\()_strided_tail
-
-.L\func_name\()_strided_loop:
-	.if \mrows == 1
-	COMPUTE_A1_B1_STRIDED_1
-	COMPUTE_A2_B2_STRIDED_1
-	.elseif \mrows == 2
-	COMPUTE_A1_B1_STRIDED_2
-	COMPUTE_A2_B2_STRIDED_2
-	.else
-	COMPUTE_A1_B1_STRIDED_4
-	COMPUTE_A2_B2_STRIDED_4
-	.endif
-	subs K_COUNT, K_COUNT, #1
-	b.gt .L\func_name\()_strided_loop
-
-.L\func_name\()_strided_tail:
-	.if \mrows == 1
-	COMPUTE_A1_B1_STRIDED_1
-	COMPUTE_A3_B3_2
-	.elseif \mrows == 2
-	COMPUTE_A1_B1_STRIDED_2
-	COMPUTE_A3_B3_2
-	.else
-	COMPUTE_A1_B1_STRIDED_4
-	COMPUTE_A3_B3_4
-	.endif
-
-	mov  FIRST_N, #0
-
-// ── EPILOGUE（每个 N tile 公共）──────────────────────────────────
-.L\func_name\()_epilogue:
-	.if \mrows == 1
-	STORE_C_1
-	.elseif \mrows == 2
-	STORE_C_2
-	.else
-	STORE_C_4
-	.endif
-
-	add  C_N_BASE, C_N_BASE, #32
-	add  B_N_BASE, B_N_BASE, LDB, lsl #4
-
-	subs N_COUNT, N_COUNT, #1
-	b.gt .L\func_name\()_n_iter
-
-.L\func_name\()_end:
-	RESTORE
-	ret
-
-.endm   // GEMM_BODY
-
-// ════════════════════════════════════════════════════════════════════
-// 三个函数实例化
-// ════════════════════════════════════════════════════════════════════
-
-GEMM_BODY bf16gemm_k_ld1, 1
-GEMM_BODY bf16gemm_k_ld2, 2
-GEMM_BODY bf16gemm_k_ld4, 4
+// bf16 store (_b suffix)
+GEMM_BODY bf16gemm_k_ld1_b, 1, 2, LOAD_C_1_B, STORE_C_1_B, 1, 16
+GEMM_BODY bf16gemm_k_ld2_b, 2, 2, LOAD_C_2_B, STORE_C_2_B, 1, 16
+GEMM_BODY bf16gemm_k_ld4_b, 4, 4, LOAD_C_4_B, STORE_C_4_B, 1, 16
