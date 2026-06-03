@@ -310,7 +310,7 @@
 
 .macro COMPUTE_A2_B2_STRIDED_1
     ldr  d0, [A_ADDR]
-    movi v0.d[1], #0
+    mov v0.d[1], xzr
     str  q0, [A_REORDER], #16
     add  A_ADDR, A_ADDR, #8
 
