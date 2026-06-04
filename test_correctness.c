@@ -457,6 +457,125 @@ static int bf16_bias_f_sweep(void) {
     printf("BF16_BIAS_F: %d/%d passed\n\n", total - failed, total);
     return failed;
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// BF16 bf16-output, no C load (_nld_b suffix) correctness tests
+//
+// C[i][j] = sum_k(A[i][k] * B[k][j])     (bf16 output, zero-init accums)
+// ═══════════════════════════════════════════════════════════════════════
+
+// nld_b kernel declarations (from bf16gemm_k.S)
+void bf16gemm_k_nld_b (const BF16_Type *A, const BF16_Type *B_reo,
+                        BF16_Type *C, int m, int k, int n,
+                        BF16_Type *A_reorder, int lda, int ldb, int ldc);
+void bf16gemm_k_nld1_b(const BF16_Type *A, const BF16_Type *B_reo,
+                        BF16_Type *C, int m, int k, int n,
+                        BF16_Type *A_reorder, int lda, int ldb, int ldc);
+void bf16gemm_k_nld2_b(const BF16_Type *A, const BF16_Type *B_reo,
+                        BF16_Type *C, int m, int k, int n,
+                        BF16_Type *A_reorder, int lda, int ldb, int ldc);
+void bf16gemm_k_nld4_b(const BF16_Type *A, const BF16_Type *B_reo,
+                        BF16_Type *C, int m, int k, int n,
+                        BF16_Type *A_reorder, int lda, int ldb, int ldc);
+
+static void bf16_nld_b_dispatch(const BF16_Type *A, const BF16_Type *B_reo,
+                                 BF16_Type *C, int m, int k, int n,
+                                 BF16_Type *A_reorder) {
+    int lda = k, ldb = k, ldc = n;
+    int processed = 0;
+    int m_full = (m / 8) * 8;
+    if (m_full > 0) {
+        bf16gemm_k_nld_b(A, B_reo, C, m_full, k, n,
+                         A_reorder, lda, ldb, ldc);
+        processed = m_full;
+    }
+    int m_rem = m - processed;
+    if (m_rem == 0) return;
+    const BF16_Type *At = A      + (uint64_t)processed * k;
+    BF16_Type       *Ct = C     + (uint64_t)processed * n;
+    BF16_Type *A_reo_t  = A_reorder + (uint64_t)processed * k;
+    if (m_rem >= 4) {
+        bf16gemm_k_nld4_b(At, B_reo, Ct, 4, k, n, A_reo_t, lda, ldb, ldc);
+        processed += 4; m_rem -= 4;
+        At = A + (uint64_t)processed * k;
+        Ct = C + (uint64_t)processed * n;
+        A_reo_t = A_reorder + (uint64_t)processed * k;
+    }
+    if (m_rem >= 2) {
+        bf16gemm_k_nld2_b(At, B_reo, Ct, 2, k, n, A_reo_t, lda, ldb, ldc);
+        processed += 2; m_rem -= 2;
+        At = A + (uint64_t)processed * k;
+        Ct = C + (uint64_t)processed * n;
+        A_reo_t = A_reorder + (uint64_t)processed * k;
+    }
+    if (m_rem >= 1)
+        bf16gemm_k_nld1_b(At, B_reo, Ct, 1, k, n, A_reo_t, lda, ldb, ldc);
+}
+
+static int bf16_nld_b_verify(const BF16_Type* A, const BF16_Type* B_orig,
+                              const BF16_Type* C_result, int m, int k, int n) {
+    BF16_Accum* ref32 = (BF16_Accum*)calloc(m * n, sizeof(BF16_Accum));
+    bf16_ref_gemm(A, B_orig, ref32, m, k, n);
+    int ok = 1;
+    float max_err = 0.0f;
+    for (int i = 0; i < m && ok; i++)
+        for (int j = 0; j < n && ok; j++) {
+            float got    = bf16_to_float(C_result[i * n + j]);
+            float expect = ref32[i * n + j];
+            float err = fabsf(got - expect);
+            if (err > max_err) max_err = err;
+            if (err > BF16_EPSILON) {
+                printf("  BF16_NLD_B MISMATCH at (%d,%d): got=%f expect=%f err=%e\n",
+                       i, j, (double)got, (double)expect, (double)err);
+                ok = 0;
+            }
+        }
+    if (ok) printf("  BF16_NLD_B OK, max_err=%e\n", (double)max_err);
+    free(ref32);
+    return ok;
+}
+
+static int bf16_nld_b_test_single(int m, int k, int n) {
+    int k_r = ((k + 7) / 8) * 8; if (k_r < 8)  k_r = 8;
+    int n_r = ((n + 7) / 8) * 8; if (n_r < 8)  n_r = 8;
+    srand(42);
+    BF16_Type *A      = (BF16_Type*)malloc((size_t)m * k_r * sizeof(BF16_Type));
+    BF16_Type *B_orig = (BF16_Type*)malloc((size_t)k_r * n_r * sizeof(BF16_Type));
+    BF16_Type *B_reo  = (BF16_Type*)malloc((size_t)k_r * n_r * sizeof(BF16_Type));
+    BF16_Type *C      = (BF16_Type*)calloc((size_t)m * n_r, sizeof(BF16_Type));
+    BF16_Type *A_reo  = (BF16_Type*)malloc((size_t)(m + 8) * k_r * sizeof(BF16_Type));
+    for (int i = 0; i < m * k_r; i++)
+        A[i] = float_to_bf16(((float)rand() / (float)RAND_MAX) * 4.0f - 2.0f);
+    for (int i = 0; i < k_r * n_r; i++)
+        B_orig[i] = float_to_bf16(((float)rand() / (float)RAND_MAX) * 4.0f - 2.0f);
+    bf16_reorder_B(B_orig, B_reo, k_r, n_r);
+    bf16_nld_b_dispatch(A, B_reo, C, m, k_r, n_r, A_reo);
+    int ok = bf16_nld_b_verify(A, B_orig, C, m, k_r, n_r);
+    free(A); free(B_orig); free(B_reo); free(C); free(A_reo);
+    return ok;
+}
+
+static int bf16_nld_b_sweep(void) {
+    printf("\n=== BF16 No-load-bf16 Correctness Sweep ===\n");
+    int M_sizes[] = {1,2,3,4,5,6,7, 8,9,10,11,12,13,14,15,
+                     16,17,18,19,20,21,22,23,
+                     24,31,32,33,39,40,41,47,48,49,55,56,57,63,64,65};
+    int K_sizes[] = {8, 16, 24, 32, 48, 64, 80, 128};
+    int N_sizes[] = {8, 16, 24, 32, 64};
+    int failed = 0, total = 0;
+    for (int mi = 0; mi < (int)(sizeof(M_sizes)/sizeof(M_sizes[0])); mi++)
+        for (int ki = 0; ki < (int)(sizeof(K_sizes)/sizeof(K_sizes[0])); ki++)
+            for (int ni = 0; ni < (int)(sizeof(N_sizes)/sizeof(N_sizes[0])); ni++) {
+                total++;
+                int m = M_sizes[mi], k = K_sizes[ki], n = N_sizes[ni];
+                if (!bf16_nld_b_test_single(m, k, n)) {
+                    printf("BF16_NLD_B FAIL: M=%d K=%d N=%d\n", m, k, n);
+                    failed++;
+                }
+            }
+    printf("BF16_NLD_B: %d/%d passed\n\n", total - failed, total);
+    return failed;
+}
 // I8 precision
 // ═══════════════════════════════════════════════════════════════════════
 typedef int32_t I8_Accum;
@@ -870,10 +989,10 @@ int main(int argc, char *argv[]) {
     const char *mode = (argc >= 2) ? argv[1] : "all";
 
     if (strcmp(mode, "all") != 0 && strcmp(mode, "bf16") != 0 &&
-        strcmp(mode, "bf16bias") != 0 &&
+        strcmp(mode, "bf16bias") != 0 && strcmp(mode, "bf16nld") != 0 &&
         strcmp(mode, "i8")   != 0 && strcmp(mode, "i8f")  != 0 &&
         strcmp(mode, "i8bias") != 0) {
-        fprintf(stderr, "Usage: %s [bf16|bf16bias|i8|i8f|i8bias|all]\n", argv[0]);
+        fprintf(stderr, "Usage: %s [bf16|bf16bias|bf16nld|i8|i8f|i8bias|all]\n", argv[0]);
         return 1;
     }
 
@@ -894,6 +1013,9 @@ int main(int argc, char *argv[]) {
     }
     if (strcmp(mode, "all") == 0 || strcmp(mode, "bf16bias") == 0) {
         total_failed += bf16_bias_f_sweep();
+    }
+    if (strcmp(mode, "all") == 0 || strcmp(mode, "bf16nld") == 0) {
+        total_failed += bf16_nld_b_sweep();
     }
 
     if (total_failed > 0) {

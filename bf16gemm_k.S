@@ -1066,6 +1066,54 @@ GEMM_BODY bf16gemm_k_ld_b, 8, 8, LOAD_C_ROWMAJOR_B, STORE_C_ROWMAJOR_B, 1, 16
 .endm
 
 // ════════════════════════════════════════════════════════════════════
+// LOAD_ZERO — zero-initialise accumulators (no C read)
+// For use with GEMM_BODY to skip the C-load phase entirely.
+// ════════════════════════════════════════════════════════════════════
+	.macro LOAD_ZERO_8
+	movi v9.4s, #0
+	movi v10.4s, #0
+	movi v11.4s, #0
+	movi v12.4s, #0
+	movi v13.4s, #0
+	movi v14.4s, #0
+	movi v15.4s, #0
+	movi v16.4s, #0
+	movi v17.4s, #0
+	movi v18.4s, #0
+	movi v19.4s, #0
+	movi v20.4s, #0
+	movi v21.4s, #0
+	movi v22.4s, #0
+	movi v23.4s, #0
+	movi v24.4s, #0
+	.endm
+
+	.macro LOAD_ZERO_2
+	movi v9.4s, #0
+	movi v10.4s, #0
+	movi v11.4s, #0
+	movi v12.4s, #0
+	.endm
+
+	.macro LOAD_ZERO_1
+	movi v9.4s, #0
+	movi v10.4s, #0
+	movi v11.4s, #0
+	movi v12.4s, #0
+	.endm
+
+	.macro LOAD_ZERO_4
+	movi v9.4s, #0
+	movi v10.4s, #0
+	movi v11.4s, #0
+	movi v12.4s, #0
+	movi v13.4s, #0
+	movi v14.4s, #0
+	movi v15.4s, #0
+	movi v16.4s, #0
+	.endm
+
+// ════════════════════════════════════════════════════════════════════
 // GEMM_BODY：函数主体宏
 //   \func_name : 符号名（不含平台前缀，由宏内部处理）
 //   \mrows     : 1 / 2 / 4
@@ -1081,3 +1129,9 @@ GEMM_BODY bf16gemm_k_ld4,   4, 4, LOAD_C_4,   STORE_C_4,   2, 32
 GEMM_BODY bf16gemm_k_ld1_b, 1, 2, LOAD_C_1_B, STORE_C_1_B, 1, 16
 GEMM_BODY bf16gemm_k_ld2_b, 2, 2, LOAD_C_2_B, STORE_C_2_B, 1, 16
 GEMM_BODY bf16gemm_k_ld4_b, 4, 4, LOAD_C_4_B, STORE_C_4_B, 1, 16
+// bf16 store, no C load (_nld_b suffix) — accumulators zero-init
+GEMM_BODY bf16gemm_k_nld_b,  8, 8, LOAD_ZERO_8, STORE_C_ROWMAJOR_B, 1, 16
+GEMM_BODY bf16gemm_k_nld1_b, 1, 2, LOAD_ZERO_2, STORE_C_1_B,        1, 16
+GEMM_BODY bf16gemm_k_nld2_b, 2, 2, LOAD_ZERO_2, STORE_C_2_B,        1, 16
+GEMM_BODY bf16gemm_k_nld4_b, 4, 4, LOAD_ZERO_4, STORE_C_4_B,        1, 16
+
