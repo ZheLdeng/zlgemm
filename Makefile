@@ -3,8 +3,8 @@
 #   bench: single-thread shape benchmark + multi-threaded test
 ARCH_FLAGS = -march=armv8.6-a+bf16+i8mm
 COMMON_FLAGS = -O2 -Wall
-ASM_I8 = i8gemm_k.S
-ASM_BF16 = bf16gemm_k.S
+ASM_I8 = i8gemm_k.S i8gemm_k_bias.S
+ASM_BF16 = bf16gemm_k.S bf16gemm_k_bias.S
 ALL_ASM = $(ASM_I8) $(ASM_BF16)
 MT_SRC = bf16gemm_mt.c i8gemm_mt.c
 
