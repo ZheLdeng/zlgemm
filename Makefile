@@ -51,17 +51,18 @@ bench: bench_perf
 	taskset -c $(or $(c),0) ./bench_perf shape.csv 2>&1 | tee bench_perf.log
 
 # ── Multi-threaded sweep targets ──
-# Sweep all thread counts < ncores.  Wrap with taskset for CPU affinity.
-MT_SHAPE ?= 2048 4096 2048
+# Sweep all shapes from shape.csv, each with all thread counts < ncores.
+# Override CSV with e.g.  make mt CSV=my_shapes.csv
+CSV ?= shape.csv
 
 mt: bench_perf
-	taskset -c $(or $(c),0-$(LAST)) ./bench_perf --mt-sweep-both $(MT_SHAPE) 2>&1 | tee mt_sweep.log
+	taskset -c $(or $(c),0-$(LAST)) ./bench_perf --mt-sweep-csv-both $(CSV) 2>&1 | tee mt_sweep.log
 
 mt-bf16: bench_perf
-	taskset -c $(or $(c),0-$(LAST)) ./bench_perf --mt-sweep $(MT_SHAPE) 2>&1 | tee mt_sweep.log
+	taskset -c $(or $(c),0-$(LAST)) ./bench_perf --mt-sweep-csv $(CSV) 2>&1 | tee mt_sweep.log
 
 mt-i8: bench_perf
-	taskset -c $(or $(c),0-$(LAST)) ./bench_perf --mt-sweep-i8 $(MT_SHAPE) 2>&1 | tee mt_sweep.log
+	taskset -c $(or $(c),0-$(LAST)) ./bench_perf --mt-sweep-csv-i8 $(CSV) 2>&1 | tee mt_sweep.log
 
 test_correctness: test_correctness.c $(ALL_ASM)
 	cc -o $@ $^ $(ARCH_FLAGS) $(COMMON_FLAGS) -lm

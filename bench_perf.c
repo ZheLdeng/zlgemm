@@ -871,9 +871,262 @@ static void bench_mt_sweep_both(int M, int K, int N, int ncores) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// CSV-based sweep helpers: benchmark one shape, return results array.
+// caller frees with free().
+// ═══════════════════════════════════════════════════════════════════════
+typedef struct {
+    int nthr;
+    double gflops;   // or gops for i8
+} SweepPoint;
+
+static SweepPoint* sweep_one_bf16(int M, int K, int N, int ncores, int *nout) {
+    int K_r = ((K + 7) / 8) * 8;   if (K_r < 8)  K_r = 8;
+    int N_r = ((N + 7) / 8) * 8;   if (N_r < 8)  N_r = 8;
+    int default_threads[] = {1, 2, 4, 8, 10, 16, 20, 32, 40, 64};
+    int ntests = sizeof(default_threads) / sizeof(default_threads[0]);
+
+    // count valid
+    int nvalid = 0;
+    for (int t = 0; t < ntests; t++)
+        if (default_threads[t] < ncores) nvalid++;
+    SweepPoint *pts = (SweepPoint*)calloc(nvalid, sizeof(SweepPoint));
+    if (!pts) { *nout = 0; return NULL; }
+
+    BF16_Type *A     = (BF16_Type*)malloc((size_t)M * K_r * sizeof(BF16_Type));
+    BF16_Type *B     = (BF16_Type*)malloc((size_t)K_r * N_r * sizeof(BF16_Type));
+    BF16_Type *B_reo = (BF16_Type*)aligned_alloc(64, (size_t)K_r * N_r * sizeof(BF16_Type));
+    BF16_Accum *C    = (BF16_Accum*)calloc((size_t)M * N_r, sizeof(BF16_Accum));
+    if (!A || !B || !B_reo || !C) goto done;
+
+    srand(42);
+    for (int i = 0; i < M * K_r; i++)
+        A[i] = float_to_bf16(((float)rand() / RAND_MAX) * 2.0f - 1.0f);
+    for (int i = 0; i < K_r * N_r; i++)
+        B[i] = float_to_bf16(((float)rand() / RAND_MAX) * 2.0f - 1.0f);
+    bf16_pack_B(B, B_reo, K_r, N_r);
+    double flops = 2.0 * (double)M * K_r * N_r;
+
+    // warmup with max valid threads
+    int max_t = default_threads[ntests - 1];
+    while (max_t >= ncores && max_t > 1) max_t /= 2;
+    for (int w = 0; w < 2; w++)
+        bf16gemm_mt_dispatch(A, B_reo, C, M, K_r, N_r, max_t);
+
+    int idx = 0;
+    for (int t = 0; t < ntests; t++) {
+        int nth = default_threads[t];
+        if (nth >= ncores) continue;
+
+        double avg = 0.0; int ok = 0;
+        for (int run = 0; run < 3; run++) {
+            memset(C, 0, (size_t)M * N_r * sizeof(BF16_Accum));
+            struct timespec s, e;
+            clock_gettime(CLOCK_MONOTONIC_RAW, &s);
+            bf16gemm_mt_dispatch(A, B_reo, C, M, K_r, N_r, nth);
+            clock_gettime(CLOCK_MONOTONIC_RAW, &e);
+            double t = get_time(&s, &e);
+            if (t > 0.0) { avg += flops / t * 1e-9; ok++; }
+        }
+        if (ok > 0) avg /= ok;
+        pts[idx].nthr   = nth;
+        pts[idx].gflops = avg;
+        idx++;
+    }
+    *nout = idx;
+
+done:
+    free(A); free(B); free(B_reo); free(C);
+    return pts;
+}
+
+static SweepPoint* sweep_one_i8(int M, int K, int N, int ncores, int *nout) {
+    int K_r = ((K + 15) / 16) * 16;  if (K_r < 16) K_r = 16;
+    int N_r = ((N + 7)  / 8)  * 8;   if (N_r < 8)   N_r = 8;
+    int default_threads[] = {1, 2, 4, 8, 10, 16, 20, 32, 40, 64};
+    int ntests = sizeof(default_threads) / sizeof(default_threads[0]);
+
+    int nvalid = 0;
+    for (int t = 0; t < ntests; t++)
+        if (default_threads[t] < ncores) nvalid++;
+    SweepPoint *pts = (SweepPoint*)calloc(nvalid, sizeof(SweepPoint));
+    if (!pts) { *nout = 0; return NULL; }
+
+    I8_Type *A     = (I8_Type*)malloc((size_t)M * K_r * sizeof(I8_Type));
+    I8_Type *B     = (I8_Type*)malloc((size_t)K_r * N_r * sizeof(I8_Type));
+    I8_Type *B_reo = (I8_Type*)aligned_alloc(64, (size_t)K_r * N_r * sizeof(I8_Type));
+    I8_Accum *C    = (I8_Accum*)calloc((size_t)M * N_r, sizeof(I8_Accum));
+    if (!A || !B || !B_reo || !C) goto done;
+
+    srand(42);
+    for (int i = 0; i < M * K_r; i++)
+        A[i] = (I8_Type)(rand() % 256 - 128);
+    for (int i = 0; i < K_r * N_r; i++)
+        B[i] = (I8_Type)(rand() % 256);
+    i8_pack_B(B, B_reo, K_r, N_r);
+    double ops = 2.0 * (double)M * K_r * N_r;
+
+    int max_t = default_threads[ntests - 1];
+    while (max_t >= ncores && max_t > 1) max_t /= 2;
+    for (int w = 0; w < 2; w++)
+        i8gemm_mt_dispatch(A, B_reo, C, M, K_r, N_r, max_t);
+
+    int idx = 0;
+    for (int t = 0; t < ntests; t++) {
+        int nth = default_threads[t];
+        if (nth >= ncores) continue;
+
+        double avg = 0.0; int ok = 0;
+        for (int run = 0; run < 3; run++) {
+            memset(C, 0, (size_t)M * N_r * sizeof(I8_Accum));
+            struct timespec s, e;
+            clock_gettime(CLOCK_MONOTONIC_RAW, &s);
+            i8gemm_mt_dispatch(A, B_reo, C, M, K_r, N_r, nth);
+            clock_gettime(CLOCK_MONOTONIC_RAW, &e);
+            double t = get_time(&s, &e);
+            if (t > 0.0) { avg += ops / t * 1e-9; ok++; }
+        }
+        if (ok > 0) avg /= ok;
+        pts[idx].nthr   = nth;
+        pts[idx].gflops = avg;   // reuse gflops field for gops
+        idx++;
+    }
+    *nout = idx;
+
+done:
+    free(A); free(B); free(B_reo); free(C);
+    return pts;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CSV-based multi-threaded sweeps — read shapes from CSV, thread-sweep each.
+// Output: CSV lines with columns M,K,N,nthr,GFLOPS,speedup,efficiency
+// ═══════════════════════════════════════════════════════════════════════
+
+static void bench_mt_sweep_csv_bf16(const char *csv_path, int ncores) {
+    FILE *fp = fopen(csv_path, "r");
+    if (!fp) { fprintf(stderr, "Cannot open %s\n", csv_path); return; }
+
+    // Pre-count shapes for progress
+    char line[256];
+    int total = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        int m, k, n;
+        if (sscanf(line, "%d,%d,%d", &m, &k, &n) == 3 && m > 0 && k > 0 && n > 0)
+            total++;
+    }
+    rewind(fp);
+
+    int default_threads[] = {1, 2, 4, 8, 10, 16, 20, 32, 40, 64};
+    int ntests = sizeof(default_threads) / sizeof(default_threads[0]);
+
+    set_omp_affinity();
+
+    printf("# bf16 mt-sweep-csv  ncores=%d  shapes=%d\n", ncores, total);
+    printf("# %6s,%6s,%6s", "M", "K", "N");
+    for (int t = 0; t < ntests; t++)
+        if (default_threads[t] < ncores)
+            printf(",%dgflops_t%d", default_threads[t], default_threads[t]);
+    printf("\n");
+
+    int done = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        int m, k, n;
+        if (sscanf(line, "%d,%d,%d", &m, &k, &n) != 3 || m <= 0 || k <= 0 || n <= 0)
+            continue;
+        done++;
+        fprintf(stderr, "\r  sweep-csv bf16 %d/%d (%d,%d,%d)    ", done, total, m, k, n);
+
+        int nout = 0;
+        SweepPoint *pts = sweep_one_bf16(m, k, n, ncores, &nout);
+        if (!pts) continue;
+
+        printf("  %6d,%6d,%6d", m, k, n);
+        for (int i = 0; i < nout; i++)
+            printf(",%.1f", pts[i].gflops);
+        printf("\n");
+        free(pts);
+    }
+    fprintf(stderr, "\n");
+    fclose(fp);
+}
+
+static void bench_mt_sweep_csv_i8(const char *csv_path, int ncores) {
+    FILE *fp = fopen(csv_path, "r");
+    if (!fp) { fprintf(stderr, "Cannot open %s\n", csv_path); return; }
+
+    char line[256];
+    int total = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        int m, k, n;
+        if (sscanf(line, "%d,%d,%d", &m, &k, &n) == 3 && m > 0 && k > 0 && n > 0)
+            total++;
+    }
+    rewind(fp);
+
+    int default_threads[] = {1, 2, 4, 8, 10, 16, 20, 32, 40, 64};
+    int ntests = sizeof(default_threads) / sizeof(default_threads[0]);
+
+    set_omp_affinity();
+
+    printf("# i8 mt-sweep-csv  ncores=%d  shapes=%d\n", ncores, total);
+    printf("# %6s,%6s,%6s", "M", "K", "N");
+    for (int t = 0; t < ntests; t++)
+        if (default_threads[t] < ncores)
+            printf(",%dgops_t%d", default_threads[t], default_threads[t]);
+    printf("\n");
+
+    int done = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        int m, k, n;
+        if (sscanf(line, "%d,%d,%d", &m, &k, &n) != 3 || m <= 0 || k <= 0 || n <= 0)
+            continue;
+        done++;
+        fprintf(stderr, "\r  sweep-csv i8 %d/%d (%d,%d,%d)    ", done, total, m, k, n);
+
+        int nout = 0;
+        SweepPoint *pts = sweep_one_i8(m, k, n, ncores, &nout);
+        if (!pts) continue;
+
+        printf("  %6d,%6d,%6d", m, k, n);
+        for (int i = 0; i < nout; i++)
+            printf(",%.1f", pts[i].gflops);
+        printf("\n");
+        free(pts);
+    }
+    fprintf(stderr, "\n");
+    fclose(fp);
+}
+
+static void bench_mt_sweep_csv_both(const char *csv_path, int ncores) {
+    bench_mt_sweep_csv_bf16(csv_path, ncores);
+    printf("\n");
+    bench_mt_sweep_csv_i8(csv_path, ncores);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════
 int main(int argc, char *argv[]) {
+    // ── CSV sweep modes (read shapes from CSV, thread-sweep each) ──
+    if (argc >= 2 && strcmp(argv[1], "--mt-sweep-csv") == 0) {
+        const char *csv = (argc >= 3) ? argv[2] : "shape.csv";
+        int ncores = detect_ncores();
+        bench_mt_sweep_csv_bf16(csv, ncores);
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "--mt-sweep-csv-i8") == 0) {
+        const char *csv = (argc >= 3) ? argv[2] : "shape.csv";
+        int ncores = detect_ncores();
+        bench_mt_sweep_csv_i8(csv, ncores);
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "--mt-sweep-csv-both") == 0) {
+        const char *csv = (argc >= 3) ? argv[2] : "shape.csv";
+        int ncores = detect_ncores();
+        bench_mt_sweep_csv_both(csv, ncores);
+        return 0;
+    }
+
     // ── Multi-threaded sweep modes ──
     if (argc >= 2 && strcmp(argv[1], "--mt-sweep") == 0) {
         if (argc < 5) {
