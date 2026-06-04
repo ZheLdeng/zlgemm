@@ -34,11 +34,11 @@ ALL_ASM = $(ASM_I8) $(ASM_BF16)
 MT_SRC = bf16gemm_mt.c i8gemm_mt.c
 
 # ── CPU binding ──
-# Override on command line:  make bench CORE=65   make mt CORES=64-78   make mt CORES=64,67,68
+# c  overrides core(s) for taskset:  make bench c=65   make mt c=64-78   make mt c=64,67,68
+# Default: bench → core 0;  mt → all cores (0..nproc-1).
 NPROC := $(shell nproc 2>/dev/null || echo 64)
 LAST  := $(shell echo $$(( $(NPROC) - 1 )))
-CORES ?= 0-$(LAST)
-CORE  ?= 0
+c     ?=
 
 .PHONY: all test bench mt mt-bf16 mt-i8 check clean
 
@@ -48,20 +48,20 @@ test: test_correctness
 	./test_correctness 2>&1 | tee test_correctness.log
 
 bench: bench_perf
-	taskset -c $(CORE) ./bench_perf shape.csv 2>&1 | tee bench_perf.log
+	taskset -c $(or $(c),0) ./bench_perf shape.csv 2>&1 | tee bench_perf.log
 
 # ── Multi-threaded sweep targets ──
 # Sweep all thread counts < ncores.  Wrap with taskset for CPU affinity.
 MT_SHAPE ?= 2048 4096 2048
 
 mt: bench_perf
-	taskset -c $(CORES) ./bench_perf --mt-sweep-both $(MT_SHAPE) 2>&1 | tee mt_sweep.log
+	taskset -c $(or $(c),0-$(LAST)) ./bench_perf --mt-sweep-both $(MT_SHAPE) 2>&1 | tee mt_sweep.log
 
 mt-bf16: bench_perf
-	taskset -c $(CORES) ./bench_perf --mt-sweep $(MT_SHAPE) 2>&1 | tee mt_sweep.log
+	taskset -c $(or $(c),0-$(LAST)) ./bench_perf --mt-sweep $(MT_SHAPE) 2>&1 | tee mt_sweep.log
 
 mt-i8: bench_perf
-	taskset -c $(CORES) ./bench_perf --mt-sweep-i8 $(MT_SHAPE) 2>&1 | tee mt_sweep.log
+	taskset -c $(or $(c),0-$(LAST)) ./bench_perf --mt-sweep-i8 $(MT_SHAPE) 2>&1 | tee mt_sweep.log
 
 test_correctness: test_correctness.c $(ALL_ASM)
 	cc -o $@ $^ $(ARCH_FLAGS) $(COMMON_FLAGS) -lm
