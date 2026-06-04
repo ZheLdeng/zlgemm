@@ -290,3 +290,234 @@ void bf16gemm_mt(const bf16_t *A_orig, const bf16_t *B_orig,
     free(A_pad);
     free(B_reo);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// BF16 GEMM with fp32 bias (_bias_f suffix) — no C load, zero-init accums
+//
+// C[i][j] = sum_k(A[i][k] * B[k][j]) + bias[j]
+//
+// Accumulators start at zero (no C read). Bias is added in fp32 domain
+// during STORE. Since bfmmla accumulators are already fp32, no conversion
+// is needed — just zip → ldp bias → fadd → stp.
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── Kernel declarations (from bf16gemm_k_bias.S) ──────────────────────
+void bf16gemm_k_ld_bias_f (const bf16_t *A, const bf16_t *B_reo,
+                            f32_t *C, int m, int k, int n,
+                            bf16_t *A_reorder, int lda, int ldb, int ldc,
+                            const f32_t *bias);
+void bf16gemm_k_ld1_bias_f(const bf16_t *A, const bf16_t *B_reo,
+                            f32_t *C, int m, int k, int n,
+                            bf16_t *A_reorder, int lda, int ldb, int ldc,
+                            const f32_t *bias);
+void bf16gemm_k_ld2_bias_f(const bf16_t *A, const bf16_t *B_reo,
+                            f32_t *C, int m, int k, int n,
+                            bf16_t *A_reorder, int lda, int ldb, int ldc,
+                            const f32_t *bias);
+void bf16gemm_k_ld4_bias_f(const bf16_t *A, const bf16_t *B_reo,
+                            f32_t *C, int m, int k, int n,
+                            bf16_t *A_reorder, int lda, int ldb, int ldc,
+                            const f32_t *bias);
+
+// ── bf16_dispatch_bias_f — Single-thread bias kernel dispatch ─────────
+static void bf16_dispatch_bias_f(const bf16_t *A, const bf16_t *B_reo,
+                                  f32_t *C, int m, int k, int n,
+                                  bf16_t *A_reorder, int ldc_global,
+                                  const f32_t *bias) {
+    int lda = k, ldb = k;
+    int processed = 0;
+
+    int m_full = (m / 8) * 8;
+    if (m_full > 0) {
+        bf16gemm_k_ld_bias_f(A, B_reo, C, m_full, k, n,
+                             A_reorder, lda, ldb, ldc_global, bias);
+        processed = m_full;
+    }
+
+    int m_rem = m - processed;
+    if (m_rem == 0) return;
+
+    const bf16_t *At = A + (uint64_t)processed * k;
+    f32_t        *Ct = C + (uint64_t)processed * ldc_global;
+    bf16_t *A_reo_t  = A_reorder + (uint64_t)processed * k;
+
+    if (m_rem >= 4) {
+        bf16gemm_k_ld4_bias_f(At, B_reo, Ct, 4, k, n, A_reo_t,
+                              lda, ldb, ldc_global, bias);
+        processed += 4; m_rem -= 4;
+        At = A + (uint64_t)processed * k;
+        Ct = C + (uint64_t)processed * ldc_global;
+        A_reo_t = A_reorder + (uint64_t)processed * k;
+    }
+    if (m_rem >= 2) {
+        bf16gemm_k_ld2_bias_f(At, B_reo, Ct, 2, k, n, A_reo_t,
+                              lda, ldb, ldc_global, bias);
+        processed += 2; m_rem -= 2;
+        At = A + (uint64_t)processed * k;
+        Ct = C + (uint64_t)processed * ldc_global;
+        A_reo_t = A_reorder + (uint64_t)processed * k;
+    }
+    if (m_rem >= 1) {
+        bf16gemm_k_ld1_bias_f(At, B_reo, Ct, 1, k, n, A_reo_t,
+                              lda, ldb, ldc_global, bias);
+    }
+}
+
+// ── tile_M_bf16_bias_f — M-tiling for bias fp32 output ────────────────
+static void tile_M_bf16_bias_f(const bf16_t *A, const bf16_t *B_reo,
+                                f32_t *C, int M, int K_r, int N_r,
+                                bf16_t *A_reo_pool, int num_threads,
+                                const f32_t *bias) {
+    int M8 = M / 8;
+    int M_rem = M - M8 * 8;
+    int blocks_per_thread = M8 / num_threads;
+    int extra_blocks       = M8 % num_threads;
+
+    #pragma omp parallel num_threads(num_threads)
+    {
+        int tid = omp_get_thread_num();
+
+        int start_block, my_blocks;
+        if (tid < extra_blocks) {
+            start_block = tid * (blocks_per_thread + 1);
+            my_blocks   = blocks_per_thread + 1;
+        } else {
+            start_block = extra_blocks * (blocks_per_thread + 1)
+                        + (tid - extra_blocks) * blocks_per_thread;
+            my_blocks   = blocks_per_thread;
+        }
+
+        int my_m = my_blocks * 8 + ((tid == num_threads - 1) ? M_rem : 0);
+
+        if (my_m > 0) {
+            int my_m_start = start_block * 8;
+            const bf16_t *my_A = A + (uint64_t)my_m_start * K_r;
+            f32_t        *my_C = C + (uint64_t)my_m_start * N_r;
+            bf16_t *my_A_reo  = A_reo_pool + (uint64_t)my_m_start * K_r;
+
+            bf16_dispatch_bias_f(my_A, B_reo, my_C, my_m, K_r, N_r,
+                                 my_A_reo, /*ldc_global=*/N_r, bias);
+        }
+    }
+}
+
+// ── tile_N_bf16_bias_f — N-tiling for bias fp32 output ────────────────
+static void tile_N_bf16_bias_f(const bf16_t *A, const bf16_t *B_reo,
+                                f32_t *C, int M, int K_r, int N_r,
+                                int num_threads, const f32_t *bias) {
+    int N8 = N_r / 8;
+    int blocks_per_thread = N8 / num_threads;
+    int extra_blocks       = N8 % num_threads;
+
+    #pragma omp parallel num_threads(num_threads)
+    {
+        int tid = omp_get_thread_num();
+
+        int start_block, my_blocks;
+        if (tid < extra_blocks) {
+            start_block = tid * (blocks_per_thread + 1);
+            my_blocks   = blocks_per_thread + 1;
+        } else {
+            start_block = extra_blocks * (blocks_per_thread + 1)
+                        + (tid - extra_blocks) * blocks_per_thread;
+            my_blocks   = blocks_per_thread;
+        }
+
+        if (my_blocks > 0) {
+            int my_n       = my_blocks * 8;
+            int my_n_start = start_block * 8;
+
+            bf16_t *my_A_reo = (bf16_t *)aligned_alloc(64,
+                (size_t)M * K_r * sizeof(bf16_t));
+            if (my_A_reo) {
+                const bf16_t *my_B    = B_reo + (uint64_t)start_block * K_r * 8;
+                f32_t        *my_C    = C + my_n_start;
+                const f32_t  *my_bias = bias + my_n_start;
+
+                bf16_dispatch_bias_f(A, my_B, my_C, M, K_r, my_n,
+                                     my_A_reo, /*ldc_global=*/N_r, my_bias);
+                free(my_A_reo);
+            }
+        }
+    }
+}
+
+// ── bf16gemm_mt_dispatch_bias_f — Core multi-threaded bias compute ────
+void bf16gemm_mt_dispatch_bias_f(const bf16_t *A, const bf16_t *B_reo,
+                                  f32_t *C, int M, int K_r, int N_r,
+                                  int num_threads, const f32_t *bias) {
+    if (num_threads <= 0) num_threads = omp_get_max_threads();
+    if (num_threads <= 0) num_threads = 1;
+
+    int M_blocks = M / 8;
+
+    if (M_blocks >= num_threads) {
+        bf16_t *A_reo_pool = (bf16_t *)aligned_alloc(64,
+            (size_t)M * K_r * sizeof(bf16_t));
+        if (!A_reo_pool) return;
+        tile_M_bf16_bias_f(A, B_reo, C, M, K_r, N_r, A_reo_pool,
+                            num_threads, bias);
+        free(A_reo_pool);
+    } else {
+        tile_N_bf16_bias_f(A, B_reo, C, M, K_r, N_r, num_threads, bias);
+    }
+}
+
+// ── bf16gemm_mt_bias_f — Convenience wrapper ──────────────────────────
+void bf16gemm_mt_bias_f(const bf16_t *A_orig, const bf16_t *B_orig,
+                         f32_t *C, int M, int K, int N,
+                         int num_threads, const f32_t *bias) {
+    int K_r = ((K + 7) / 8) * 8;   if (K_r < 8)  K_r = 8;
+    int N_r = ((N + 7) / 8) * 8;   if (N_r < 8)  N_r = 8;
+
+    // Pack B
+    bf16_t *B_reo = (bf16_t *)aligned_alloc(64,
+        (size_t)K_r * N_r * sizeof(bf16_t));
+    if (!B_reo) return;
+
+    bf16_t *B_pad = NULL;
+    const bf16_t *B_use;
+    if (K_r == K && N_r == N) {
+        B_use = B_orig;
+    } else {
+        B_pad = (bf16_t *)calloc((size_t)K_r * N_r, sizeof(bf16_t));
+        if (!B_pad) { free(B_reo); return; }
+        for (int i = 0; i < K; i++)
+            memcpy(B_pad + i * N_r, B_orig + i * N, N * sizeof(bf16_t));
+        B_use = B_pad;
+    }
+    bf16_pack_B(B_use, B_reo, K_r, N_r);
+    free(B_pad);
+
+    // Pad bias if needed
+    f32_t *bias_pad = NULL;
+    const f32_t *bias_use;
+    if (N_r == N) {
+        bias_use = bias;
+    } else {
+        bias_pad = (f32_t *)calloc((size_t)N_r, sizeof(f32_t));
+        if (!bias_pad) { free(B_reo); return; }
+        memcpy(bias_pad, bias, N * sizeof(f32_t));
+        bias_use = bias_pad;
+    }
+
+    // Pad A if needed
+    bf16_t *A_pad = NULL;
+    const bf16_t *A_use;
+    if (K_r == K) {
+        A_use = A_orig;
+    } else {
+        A_pad = (bf16_t *)calloc((size_t)M * K_r, sizeof(bf16_t));
+        if (!A_pad) { free(bias_pad); free(B_reo); return; }
+        for (int i = 0; i < M; i++)
+            memcpy(A_pad + i * K_r, A_orig + i * K, K * sizeof(bf16_t));
+        A_use = A_pad;
+    }
+
+    bf16gemm_mt_dispatch_bias_f(A_use, B_reo, C, M, K_r, N_r,
+                                 num_threads, bias_use);
+
+    free(A_pad);
+    free(bias_pad);
+    free(B_reo);
+}

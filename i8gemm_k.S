@@ -280,6 +280,243 @@
 	stp  q6, q7, [x13]
 	.endm
 
+
+	// ── fp32 store variants: LOAD_C_F / STORE_C_F ────────────────────
+	// The smmla accumulator is int32 (.4s). These macros add:
+	//   LOAD:  fcvtzs (fp32→int32) to load C into accumulators
+	//   STORE: scvtf  (int32→fp32) to write accumulators as fp32 output
+	// ldc_shift=2, c_adv=32 — same as int32 (both are 4 bytes/element)
+
+	// ── m=8 fp32 ───────────────────────────────────────────────────
+
+		.macro LOAD_C_ROWMAJOR_F
+		add  x11, C_M_BASE, LDC_B
+		add  x12, C_M_BASE, LDC_B, lsl #1
+		add  x14, C_M_BASE, LDC_B, lsl #2
+		sub  x13, x14, LDC_B
+		add  x15, x11, LDC_B, lsl #2
+		add  x16, x12, LDC_B, lsl #2
+		add  x17, x15, LDC_B, lsl #1
+
+		ldp  q0, q1, [C_M_BASE]
+		ldp  q2, q3, [x11]
+		ldp  q4, q5, [x12]
+		ldp  q6, q7, [x13]
+		ldp  q8, q25, [x14]
+		ldp  q26, q27, [x15]
+		ldp  q28, q29, [x16]
+		ldp  q30, q31, [x17]
+
+		fcvtzs v0.4s, v0.4s
+		fcvtzs v1.4s, v1.4s
+		fcvtzs v2.4s, v2.4s
+		fcvtzs v3.4s, v3.4s
+		fcvtzs v4.4s, v4.4s
+		fcvtzs v5.4s, v5.4s
+		fcvtzs v6.4s, v6.4s
+		fcvtzs v7.4s, v7.4s
+		fcvtzs v8.4s, v8.4s
+		fcvtzs v25.4s, v25.4s
+		fcvtzs v26.4s, v26.4s
+		fcvtzs v27.4s, v27.4s
+		fcvtzs v28.4s, v28.4s
+		fcvtzs v29.4s, v29.4s
+		fcvtzs v30.4s, v30.4s
+		fcvtzs v31.4s, v31.4s
+
+		zip1 v9.2d,  v0.2d, v2.2d
+		zip2 v10.2d, v0.2d, v2.2d
+		zip1 v11.2d, v1.2d, v3.2d
+		zip2 v12.2d, v1.2d, v3.2d
+
+		zip1 v13.2d, v4.2d, v6.2d
+		zip2 v14.2d, v4.2d, v6.2d
+		zip1 v15.2d, v5.2d, v7.2d
+		zip2 v16.2d, v5.2d, v7.2d
+
+		zip1 v17.2d, v8.2d,  v26.2d
+		zip2 v18.2d, v8.2d,  v26.2d
+		zip1 v19.2d, v25.2d, v27.2d
+		zip2 v20.2d, v25.2d, v27.2d
+
+		zip1 v21.2d, v28.2d, v30.2d
+		zip2 v22.2d, v28.2d, v30.2d
+		zip1 v23.2d, v29.2d, v31.2d
+		zip2 v24.2d, v29.2d, v31.2d
+		.endm
+
+		.macro STORE_C_ROWMAJOR_F
+		add  x11, C_M_BASE, LDC_B
+		add  x12, C_M_BASE, LDC_B, lsl #1
+		add  x14, C_M_BASE, LDC_B, lsl #2
+		sub  x13, x14, LDC_B
+		add  x15, x11, LDC_B, lsl #2
+		add  x16, x12, LDC_B, lsl #2
+		add  x17, x15, LDC_B, lsl #1
+
+		zip1 v0.2d, v9.2d,  v10.2d
+		zip1 v1.2d, v11.2d, v12.2d
+		zip2 v2.2d, v9.2d,  v10.2d
+		zip2 v3.2d, v11.2d, v12.2d
+
+		zip1 v4.2d, v13.2d, v14.2d
+		zip1 v5.2d, v15.2d, v16.2d
+		zip2 v6.2d, v13.2d, v14.2d
+		zip2 v7.2d, v15.2d, v16.2d
+
+		zip1 v8.2d, v17.2d, v18.2d
+		zip1 v25.2d, v19.2d, v20.2d
+		zip2 v26.2d, v17.2d, v18.2d
+		zip2 v27.2d, v19.2d, v20.2d
+
+		zip1 v28.2d, v21.2d, v22.2d
+		zip1 v29.2d, v23.2d, v24.2d
+		zip2 v30.2d, v21.2d, v22.2d
+		zip2 v31.2d, v23.2d, v24.2d
+
+		scvtf v0.4s, v0.4s
+		scvtf v1.4s, v1.4s
+		scvtf v2.4s, v2.4s
+		scvtf v3.4s, v3.4s
+		scvtf v4.4s, v4.4s
+		scvtf v5.4s, v5.4s
+		scvtf v6.4s, v6.4s
+		scvtf v7.4s, v7.4s
+		scvtf v8.4s, v8.4s
+		scvtf v25.4s, v25.4s
+		scvtf v26.4s, v26.4s
+		scvtf v27.4s, v27.4s
+		scvtf v28.4s, v28.4s
+		scvtf v29.4s, v29.4s
+		scvtf v30.4s, v30.4s
+		scvtf v31.4s, v31.4s
+
+		stp  q0, q1, [C_M_BASE]
+		stp  q2, q3, [x11]
+		stp  q4, q5, [x12]
+		stp  q6, q7, [x13]
+		stp  q8, q25, [x14]
+		stp  q26, q27, [x15]
+		stp  q28, q29, [x16]
+		stp  q30, q31, [x17]
+		.endm
+
+	// ── m=1 fp32 ───────────────────────────────────────────────────
+
+		.macro LOAD_C_1_F
+		ldp  q0, q1, [C_M_BASE]
+		movi v2.16b, #0
+		movi v3.16b, #0
+		fcvtzs v0.4s, v0.4s
+		fcvtzs v1.4s, v1.4s
+		zip1 v9.2d,  v0.2d, v2.2d
+		zip2 v10.2d, v0.2d, v2.2d
+		zip1 v11.2d, v1.2d, v3.2d
+		zip2 v12.2d, v1.2d, v3.2d
+		.endm
+
+		.macro STORE_C_1_F
+		zip1 v0.2d, v9.2d,  v10.2d
+		zip1 v1.2d, v11.2d, v12.2d
+		scvtf v0.4s, v0.4s
+		scvtf v1.4s, v1.4s
+		stp  q0, q1, [C_M_BASE]
+		.endm
+
+	// ── m=2 fp32 ───────────────────────────────────────────────────
+
+		.macro LOAD_C_2_F
+		add  x11, C_M_BASE, LDC_B
+		ldp  q0, q1, [C_M_BASE]
+		ldp  q2, q3, [x11]
+		fcvtzs v0.4s, v0.4s
+		fcvtzs v1.4s, v1.4s
+		fcvtzs v2.4s, v2.4s
+		fcvtzs v3.4s, v3.4s
+		zip1 v9.2d,  v0.2d, v2.2d
+		zip2 v10.2d, v0.2d, v2.2d
+		zip1 v11.2d, v1.2d, v3.2d
+		zip2 v12.2d, v1.2d, v3.2d
+		.endm
+
+		.macro STORE_C_2_F
+		zip1 v0.2d, v9.2d,  v10.2d
+		zip1 v1.2d, v11.2d, v12.2d
+		zip2 v2.2d, v9.2d,  v10.2d
+		zip2 v3.2d, v11.2d, v12.2d
+		scvtf v0.4s, v0.4s
+		scvtf v1.4s, v1.4s
+		scvtf v2.4s, v2.4s
+		scvtf v3.4s, v3.4s
+		add  x11, C_M_BASE, LDC_B
+		stp  q0, q1, [C_M_BASE]
+		stp  q2, q3, [x11]
+		.endm
+
+	// ── m=4 fp32 ───────────────────────────────────────────────────
+
+		.macro LOAD_C_4_F
+		add  x11, C_M_BASE, LDC_B
+		add  x12, C_M_BASE, LDC_B, lsl #1
+		add  x14, C_M_BASE, LDC_B, lsl #2
+		sub  x13, x14, LDC_B
+
+		ldp  q0, q1, [C_M_BASE]
+		ldp  q2, q3, [x11]
+		ldp  q4, q5, [x12]
+		ldp  q6, q7, [x13]
+
+		fcvtzs v0.4s, v0.4s
+		fcvtzs v1.4s, v1.4s
+		fcvtzs v2.4s, v2.4s
+		fcvtzs v3.4s, v3.4s
+		fcvtzs v4.4s, v4.4s
+		fcvtzs v5.4s, v5.4s
+		fcvtzs v6.4s, v6.4s
+		fcvtzs v7.4s, v7.4s
+
+		zip1 v9.2d,  v0.2d, v2.2d
+		zip2 v10.2d, v0.2d, v2.2d
+		zip1 v11.2d, v1.2d, v3.2d
+		zip2 v12.2d, v1.2d, v3.2d
+
+		zip1 v13.2d, v4.2d, v6.2d
+		zip2 v14.2d, v4.2d, v6.2d
+		zip1 v15.2d, v5.2d, v7.2d
+		zip2 v16.2d, v5.2d, v7.2d
+		.endm
+
+		.macro STORE_C_4_F
+		add  x11, C_M_BASE, LDC_B
+		add  x12, C_M_BASE, LDC_B, lsl #1
+		add  x14, C_M_BASE, LDC_B, lsl #2
+		sub  x13, x14, LDC_B
+
+		zip1 v0.2d, v9.2d,  v10.2d
+		zip1 v1.2d, v11.2d, v12.2d
+		zip2 v2.2d, v9.2d,  v10.2d
+		zip2 v3.2d, v11.2d, v12.2d
+
+		zip1 v4.2d, v13.2d, v14.2d
+		zip1 v5.2d, v15.2d, v16.2d
+		zip2 v6.2d, v13.2d, v14.2d
+		zip2 v7.2d, v15.2d, v16.2d
+
+		scvtf v0.4s, v0.4s
+		scvtf v1.4s, v1.4s
+		scvtf v2.4s, v2.4s
+		scvtf v3.4s, v3.4s
+		scvtf v4.4s, v4.4s
+		scvtf v5.4s, v5.4s
+		scvtf v6.4s, v6.4s
+		scvtf v7.4s, v7.4s
+
+		stp  q0, q1, [C_M_BASE]
+		stp  q2, q3, [x11]
+		stp  q4, q5, [x12]
+		stp  q6, q7, [x13]
+		.endm
+
 // ════════════════════════════════════════════════════════════════════
 // CACHED PATH  按 mrows 特化
 // 从 A_reorder 连续读取（后续 N iteration 使用）
@@ -883,3 +1120,9 @@ GEMM_BODY i8gemm_k_ld,  8, 8, LOAD_C_ROWMAJOR, STORE_C_ROWMAJOR, 2, 32
 GEMM_BODY i8gemm_k_ld1, 1, 2, LOAD_C_1,        STORE_C_1,        2, 32
 GEMM_BODY i8gemm_k_ld2, 2, 2, LOAD_C_2,        STORE_C_2,        2, 32
 GEMM_BODY i8gemm_k_ld4, 4, 4, LOAD_C_4,        STORE_C_4,        2, 32
+
+// fp32 store variants (_f suffix)
+GEMM_BODY i8gemm_k_ld_f,  8, 8, LOAD_C_ROWMAJOR_F, STORE_C_ROWMAJOR_F, 2, 32
+GEMM_BODY i8gemm_k_ld1_f, 1, 2, LOAD_C_1_F,        STORE_C_1_F,        2, 32
+GEMM_BODY i8gemm_k_ld2_f, 2, 2, LOAD_C_2_F,        STORE_C_2_F,        2, 32
+GEMM_BODY i8gemm_k_ld4_f, 4, 4, LOAD_C_4_F,        STORE_C_4_F,        2, 32
