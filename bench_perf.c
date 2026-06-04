@@ -1,17 +1,24 @@
 // bench_perf.c
 // Unified benchmark: peak instruction throughput (bfmmla/smmla) +
-// shape.csv single-thread test + multi-threaded BF16 GEMM test.
+// shape.csv single-thread test + multi-threaded BF16/I8 GEMM test.
 //
 // Build:
-//   cc -o bench_perf bench_perf.c bf16gemm_mt.c
-//      i8gemm_k.S bf16gemm_k.S
+//   cc -o bench_perf bench_perf.c bf16gemm_mt.c i8gemm_mt.c
+//      i8gemm_k.S i8gemm_k_bias.S bf16gemm_k.S bf16gemm_k_bias.S
 //      -march=armv8.6-a+bf16+i8mm -O2 -Wall -fopenmp -lm
 //
 // Usage:
-//   ./bench_perf [shape.csv]                  single-thread shape bench (default)
-//   ./bench_perf --mt M K N [nthreads]        multi-threaded BF16 GEMM bench
-//   ./bench_perf --mt-i8 M K N [nthreads]     multi-threaded I8 GEMM bench
-//   ./bench_perf --mt-both M K N [nthreads]   multi-threaded BF16+I8 GEMM bench
+//   ./bench_perf [shape.csv]                    single-thread shape bench (default)
+//   ./bench_perf --mt M K N [nthreads]          multi-threaded BF16 GEMM bench
+//   ./bench_perf --mt-i8 M K N [nthreads]       multi-threaded I8 GEMM bench
+//   ./bench_perf --mt-both M K N [nthreads]     multi-threaded BF16+I8 GEMM bench
+//   ./bench_perf --mt-sweep M K N               thread sweep: BF16 (1,2,4,8,10,16,20,32,40,64)
+//   ./bench_perf --mt-sweep-i8 M K N            thread sweep: I8
+//   ./bench_perf --mt-sweep-both M K N          thread sweep: BF16+I8
+//
+// Sweep mode: tests nthreads < ncores only (no oversubscription).
+//   Set OMP_PLACES=cores OMP_PROC_BIND=close for core affinity.
+//   For best results, wrap with taskset: taskset -c 0-$(nproc-1) ./bench_perf --mt-sweep M K N
 //
 // Output (sorted by efficiency descending):
 //   M K N  bf16_eff%  bf16_GFLOPS  i8_eff%  i8_GOPS
@@ -685,9 +692,234 @@ static void bench_mt_both(int M, int K, int N, int num_threads) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Multi-threaded sweep (--mt-sweep / --mt-sweep-i8 / --mt-sweep-both)
+//
+// Sweeps thread counts {1,2,4,8,10,16,20,32,40,64}, skipping any
+// count where nthreads >= ncores (no oversubscription).
+// Sets OMP_PLACES=cores OMP_PROC_BIND=close for core affinity.
+// ═══════════════════════════════════════════════════════════════════════
+static int detect_ncores(void) {
+    int nc = omp_get_num_procs();
+    if (nc <= 0) nc = 64; // fallback
+    return nc;
+}
+
+static void set_omp_affinity(void) {
+    setenv("OMP_PLACES",  "cores", 1);
+    setenv("OMP_PROC_BIND", "close", 1);
+}
+
+static void bench_mt_sweep_bf16(int M, int K, int N, int ncores) {
+    int K_r = ((K + 7) / 8) * 8;   if (K_r < 8)  K_r = 8;
+    int N_r = ((N + 7) / 8) * 8;   if (N_r < 8)  N_r = 8;
+
+    srand(42);
+    BF16_Type *A = (BF16_Type*)malloc((size_t)M * K_r * sizeof(BF16_Type));
+    BF16_Type *B = (BF16_Type*)malloc((size_t)K_r * N_r * sizeof(BF16_Type));
+    BF16_Type *B_reo = (BF16_Type*)aligned_alloc(64,
+        (size_t)K_r * N_r * sizeof(BF16_Type));
+    BF16_Accum *C = (BF16_Accum*)calloc((size_t)M * N_r, sizeof(BF16_Accum));
+    if (!A || !B || !B_reo || !C) {
+        fprintf(stderr, "Alloc failed\n"); goto cleanup;
+    }
+
+    for (int i = 0; i < M * K_r; i++)
+        A[i] = float_to_bf16(((float)rand() / RAND_MAX) * 2.0f - 1.0f);
+    for (int i = 0; i < K_r * N_r; i++)
+        B[i] = float_to_bf16(((float)rand() / RAND_MAX) * 2.0f - 1.0f);
+
+    bf16_pack_B(B, B_reo, K_r, N_r);
+
+    double flops_per_call = 2.0 * (double)M * K_r * N_r;
+    int default_threads[] = {1, 2, 4, 8, 10, 16, 20, 32, 40, 64};
+    int ntests = sizeof(default_threads) / sizeof(default_threads[0]);
+
+    int valid = 0;
+    for (int t = 0; t < ntests; t++)
+        if (default_threads[t] < ncores) valid++;
+
+    printf("# ═══ BF16 Multi-threaded Sweep ═══\n");
+    printf("# M=%d K=%d N=%d  (K_r=%d N_r=%d)  ncores=%d\n",
+           M, K, N, K_r, N_r, ncores);
+    printf("# Warmup...\n");
+
+    // Warmup with max valid threads
+    int max_t = default_threads[ntests - 1];
+    while (max_t >= ncores && max_t > 1) max_t /= 2;
+    for (int w = 0; w < 3; w++)
+        bf16gemm_mt_dispatch(A, B_reo, C, M, K_r, N_r, max_t);
+
+    printf("#\n");
+    printf("# %6s  %10s  %8s  %9s\n",
+           "nthr", "GFLOPS", "speedup", "efficiency");
+
+    set_omp_affinity();
+
+    double st_gflops = 0.0;
+    for (int t = 0; t < ntests; t++) {
+        int nth = default_threads[t];
+        if (nth >= ncores) continue;
+
+        double avg = 0.0;
+        int runs = 5, ok = 0;
+        for (int run = 0; run < runs; run++) {
+            memset(C, 0, (size_t)M * N_r * sizeof(BF16_Accum));
+            struct timespec s, e;
+            clock_gettime(CLOCK_MONOTONIC_RAW, &s);
+            bf16gemm_mt_dispatch(A, B_reo, C, M, K_r, N_r, nth);
+            clock_gettime(CLOCK_MONOTONIC_RAW, &e);
+            double elapsed = get_time(&s, &e);
+            if (elapsed > 0.0) { avg += flops_per_call / elapsed * 1e-9; ok++; }
+        }
+        if (ok > 0) avg /= ok;
+        if (nth == 1) st_gflops = avg;
+
+        double speedup = (st_gflops > 0.0) ? avg / st_gflops : 1.0;
+        printf("  %6d  %10.1f  %6.2fx  %9.1f%%\n",
+               nth, avg, speedup, speedup / nth * 100.0);
+    }
+
+    printf("#\n");
+    printf("# Efficiency = speedup / nthreads * 100%%\n");
+    printf("# max_cores > nthreads for every row shown.\n");
+
+cleanup:
+    free(A); free(B); free(B_reo); free(C);
+}
+
+static void bench_mt_sweep_i8(int M, int K, int N, int ncores) {
+    int K_r = ((K + 15) / 16) * 16;  if (K_r < 16) K_r = 16;
+    int N_r = ((N + 7)  / 8)  * 8;   if (N_r < 8)   N_r = 8;
+
+    srand(42);
+    I8_Type *A = (I8_Type*)malloc((size_t)M * K_r * sizeof(I8_Type));
+    I8_Type *B = (I8_Type*)malloc((size_t)K_r * N_r * sizeof(I8_Type));
+    I8_Type *B_reo = (I8_Type*)aligned_alloc(64,
+        (size_t)K_r * N_r * sizeof(I8_Type));
+    I8_Accum *C = (I8_Accum*)calloc((size_t)M * N_r, sizeof(I8_Accum));
+    if (!A || !B || !B_reo || !C) {
+        fprintf(stderr, "Alloc failed\n"); goto cleanup;
+    }
+
+    for (int i = 0; i < M * K_r; i++)
+        A[i] = (I8_Type)(rand() % 256 - 128);
+    for (int i = 0; i < K_r * N_r; i++)
+        B[i] = (I8_Type)(rand() % 256);
+
+    i8_pack_B(B, B_reo, K_r, N_r);
+
+    double ops_per_call = 2.0 * (double)M * K_r * N_r;
+    int default_threads[] = {1, 2, 4, 8, 10, 16, 20, 32, 40, 64};
+    int ntests = sizeof(default_threads) / sizeof(default_threads[0]);
+
+    int valid = 0;
+    for (int t = 0; t < ntests; t++)
+        if (default_threads[t] < ncores) valid++;
+
+    printf("# ═══ I8 Multi-threaded Sweep ═══\n");
+    printf("# M=%d K=%d N=%d  (K_r=%d N_r=%d)  ncores=%d\n",
+           M, K, N, K_r, N_r, ncores);
+    printf("# Warmup...\n");
+
+    int max_t = default_threads[ntests - 1];
+    while (max_t >= ncores && max_t > 1) max_t /= 2;
+    for (int w = 0; w < 3; w++)
+        i8gemm_mt_dispatch(A, B_reo, C, M, K_r, N_r, max_t);
+
+    printf("#\n");
+    printf("# %6s  %10s  %8s  %9s\n",
+           "nthr", "GOPS", "speedup", "efficiency");
+
+    set_omp_affinity();
+
+    double st_gops = 0.0;
+    for (int t = 0; t < ntests; t++) {
+        int nth = default_threads[t];
+        if (nth >= ncores) continue;
+
+        double avg = 0.0;
+        int runs = 5, ok = 0;
+        for (int run = 0; run < runs; run++) {
+            memset(C, 0, (size_t)M * N_r * sizeof(I8_Accum));
+            struct timespec s, e;
+            clock_gettime(CLOCK_MONOTONIC_RAW, &s);
+            i8gemm_mt_dispatch(A, B_reo, C, M, K_r, N_r, nth);
+            clock_gettime(CLOCK_MONOTONIC_RAW, &e);
+            double elapsed = get_time(&s, &e);
+            if (elapsed > 0.0) { avg += ops_per_call / elapsed * 1e-9; ok++; }
+        }
+        if (ok > 0) avg /= ok;
+        if (nth == 1) st_gops = avg;
+
+        double speedup = (st_gops > 0.0) ? avg / st_gops : 1.0;
+        printf("  %6d  %10.1f  %6.2fx  %9.1f%%\n",
+               nth, avg, speedup, speedup / nth * 100.0);
+    }
+
+    printf("#\n");
+    printf("# Efficiency = speedup / nthreads * 100%%\n");
+    printf("# max_cores > nthreads for every row shown.\n");
+
+cleanup:
+    free(A); free(B); free(B_reo); free(C);
+}
+
+static void bench_mt_sweep_both(int M, int K, int N, int ncores) {
+    bench_mt_sweep_bf16(M, K, N, ncores);
+    printf("\n");
+    bench_mt_sweep_i8(M, K, N, ncores);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════
 int main(int argc, char *argv[]) {
+    // ── Multi-threaded sweep modes ──
+    if (argc >= 2 && strcmp(argv[1], "--mt-sweep") == 0) {
+        if (argc < 5) {
+            fprintf(stderr, "Usage: %s --mt-sweep M K N\n", argv[0]);
+            return 1;
+        }
+        int M = atoi(argv[2]), K = atoi(argv[3]), N = atoi(argv[4]);
+        if (M <= 0 || K <= 0 || N <= 0) {
+            fprintf(stderr, "Invalid arguments\n");
+            return 1;
+        }
+        int ncores = detect_ncores();
+        bench_mt_sweep_bf16(M, K, N, ncores);
+        return 0;
+    }
+
+    if (argc >= 2 && strcmp(argv[1], "--mt-sweep-i8") == 0) {
+        if (argc < 5) {
+            fprintf(stderr, "Usage: %s --mt-sweep-i8 M K N\n", argv[0]);
+            return 1;
+        }
+        int M = atoi(argv[2]), K = atoi(argv[3]), N = atoi(argv[4]);
+        if (M <= 0 || K <= 0 || N <= 0) {
+            fprintf(stderr, "Invalid arguments\n");
+            return 1;
+        }
+        int ncores = detect_ncores();
+        bench_mt_sweep_i8(M, K, N, ncores);
+        return 0;
+    }
+
+    if (argc >= 2 && strcmp(argv[1], "--mt-sweep-both") == 0) {
+        if (argc < 5) {
+            fprintf(stderr, "Usage: %s --mt-sweep-both M K N\n", argv[0]);
+            return 1;
+        }
+        int M = atoi(argv[2]), K = atoi(argv[3]), N = atoi(argv[4]);
+        if (M <= 0 || K <= 0 || N <= 0) {
+            fprintf(stderr, "Invalid arguments\n");
+            return 1;
+        }
+        int ncores = detect_ncores();
+        bench_mt_sweep_both(M, K, N, ncores);
+        return 0;
+    }
+
     // ── Multi-threaded modes ──
     if (argc >= 2 && strcmp(argv[1], "--mt") == 0) {
         if (argc < 5) {

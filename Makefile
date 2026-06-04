@@ -1,6 +1,31 @@
+# ═══════════════════════════════════════════════════════════════════════════
 # i8gemm Makefile
-# Supported targets: test, bench, check, clean
-#   bench: single-thread shape benchmark + multi-threaded test
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Targets:
+#   all            — build + run test and bench (default)
+#   test           — correctness: bf16 (fp32/bf16/bias_f/nld_b) + i8 (i32/fp32/bias_f)
+#   bench          — single-thread per-shape benchmark (reads shape.csv)
+#                      CORE=n   bind to core n (default 0)
+#   mt             — multi-threaded sweep (bf16+i8, M=K=N=2048, taskset all cores)
+#   mt-bf16        — multi-threaded sweep bf16 only
+#   mt-i8          — multi-threaded sweep i8 only
+#                      CORES=64-78  bind to range
+#                      CORES=64,67,68  bind to list
+#                      (default: 0-$(nproc-1), all cores)
+#   check          — same as test (correctness + log)
+#   clean          — remove binaries, objects, logs
+#
+# Sweep sequence: {1,2,4,8,10,16,20,32,40,64}, skipping nthreads >= ncores.
+# Core affinity: taskset + OMP_PLACES=cores OMP_PROC_BIND=close.
+#
+# Source groups:
+#   ASM_I8   = i8gemm_k.S i8gemm_k_bias.S        (int8  GEMM kernels)
+#   ASM_BF16 = bf16gemm_k.S bf16gemm_k_bias.S     (bf16  GEMM kernels)
+#   MT_SRC   = bf16gemm_mt.c i8gemm_mt.c          (multi-threading dispatchers)
+#
+# Build requirements: ARMv8.6-A + BF16 + I8MM, OpenMP, math lib.
+# ═══════════════════════════════════════════════════════════════════════════
 ARCH_FLAGS = -march=armv8.6-a+bf16+i8mm
 COMMON_FLAGS = -O2 -Wall
 ASM_I8 = i8gemm_k.S i8gemm_k_bias.S
@@ -8,7 +33,14 @@ ASM_BF16 = bf16gemm_k.S bf16gemm_k_bias.S
 ALL_ASM = $(ASM_I8) $(ASM_BF16)
 MT_SRC = bf16gemm_mt.c i8gemm_mt.c
 
-.PHONY: all test bench check clean
+# ── CPU binding ──
+# Override on command line:  make bench CORE=65   make mt CORES=64-78   make mt CORES=64,67,68
+NPROC := $(shell nproc 2>/dev/null || echo 64)
+LAST  := $(shell echo $$(( $(NPROC) - 1 )))
+CORES ?= 0-$(LAST)
+CORE  ?= 0
+
+.PHONY: all test bench mt mt-bf16 mt-i8 check clean
 
 all: test bench
 
@@ -16,11 +48,20 @@ test: test_correctness
 	./test_correctness 2>&1 | tee test_correctness.log
 
 bench: bench_perf
-	./bench_perf shape.csv 2>&1 | tee bench_perf.log
+	taskset -c $(CORE) ./bench_perf shape.csv 2>&1 | tee bench_perf.log
 
-# Multi-threaded BF16 GEMM benchmark (via bench_perf --mt)
+# ── Multi-threaded sweep targets ──
+# Sweep all thread counts < ncores.  Wrap with taskset for CPU affinity.
+MT_SHAPE ?= 2048 4096 2048
+
 mt: bench_perf
-	./bench_perf --mt 2048 4096 2048
+	taskset -c $(CORES) ./bench_perf --mt-sweep-both $(MT_SHAPE) 2>&1 | tee mt_sweep.log
+
+mt-bf16: bench_perf
+	taskset -c $(CORES) ./bench_perf --mt-sweep $(MT_SHAPE) 2>&1 | tee mt_sweep.log
+
+mt-i8: bench_perf
+	taskset -c $(CORES) ./bench_perf --mt-sweep-i8 $(MT_SHAPE) 2>&1 | tee mt_sweep.log
 
 test_correctness: test_correctness.c $(ALL_ASM)
 	cc -o $@ $^ $(ARCH_FLAGS) $(COMMON_FLAGS) -lm

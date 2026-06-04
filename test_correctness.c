@@ -158,7 +158,6 @@ static int bf16_verify(const BF16_Type* A, const BF16_Type* B_orig,
                 ok = 0;
             }
         }
-    if (ok) printf("  BF16 OK, max_err=%e\n", (double)max_err);
     free(ref);
     return ok;
 }
@@ -188,7 +187,6 @@ static int bf16_test_single(int m, int k, int n) {
 }
 
 static int bf16_sweep(void) {
-    printf("\n=== BF16 Tail Correctness Sweep ===\n");
     int M_sizes[] = {1,2,3,4,5,6,7, 8,9,10,11,12,13,14,15,
                      16,17,18,19,20,21,22,23,
                      24,31,32,33,39,40,41,47,48,49,55,56,57,63,64,65};
@@ -205,7 +203,7 @@ static int bf16_sweep(void) {
                     failed++;
                 }
             }
-    printf("BF16: %d/%d passed\n\n", total - failed, total);
+    printf("  bf16_fp32:    %d/%d\n", total - failed, total);
     return failed;
 }
 
@@ -266,7 +264,6 @@ static int bf16_b_verify(const BF16_Type* A, const BF16_Type* B_orig,
                 ok = 0;
             }
         }
-    if (ok) printf("  BF16_B OK, max_err=%e\n", (double)max_err);
     free(ref32);
     return ok;
 }
@@ -292,7 +289,6 @@ static int bf16_b_test_single(int m, int k, int n) {
 }
 
 static int bf16_b_sweep(void) {
-    printf("\n=== BF16 Store-bf16 Correctness Sweep ===\n");
     int M_sizes[] = {1,2,3,4,5,6,7, 8,9,10,11,12,13,14,15,
                      16,17,18,19,20,21,22,23,
                      24,31,32,33,39,40,41,47,48,49,55,56,57,63,64,65};
@@ -309,7 +305,7 @@ static int bf16_b_sweep(void) {
                     failed++;
                 }
             }
-    printf("BF16_B: %d/%d passed\n\n", total - failed, total);
+    printf("  bf16_bf16:    %d/%d\n", total - failed, total);
     return failed;
 }
 
@@ -404,7 +400,6 @@ static int bf16_bias_f_verify(const BF16_Type* A, const BF16_Type* B_orig,
                 ok = 0;
             }
         }
-    if (ok) printf("  BF16_BIAS_F OK, max_err=%e\n", (double)max_err);
     free(ref);
     return ok;
 }
@@ -437,7 +432,6 @@ static int bf16_bias_f_test_single(int m, int k, int n) {
 }
 
 static int bf16_bias_f_sweep(void) {
-    printf("\n=== BF16 Bias-fp32 Correctness Sweep ===\n");
     int M_sizes[] = {1,2,3,4,5,6,7, 8,9,10,11,12,13,14,15,
                      16,17,18,19,20,21,22,23,
                      24,31,32,33,39,40,41,47,48,49,55,56,57,63,64,65};
@@ -454,7 +448,7 @@ static int bf16_bias_f_sweep(void) {
                     failed++;
                 }
             }
-    printf("BF16_BIAS_F: %d/%d passed\n\n", total - failed, total);
+    printf("  bf16_bias_f:  %d/%d\n", total - failed, total);
     return failed;
 }
 
@@ -530,7 +524,6 @@ static int bf16_nld_b_verify(const BF16_Type* A, const BF16_Type* B_orig,
                 ok = 0;
             }
         }
-    if (ok) printf("  BF16_NLD_B OK, max_err=%e\n", (double)max_err);
     free(ref32);
     return ok;
 }
@@ -556,7 +549,6 @@ static int bf16_nld_b_test_single(int m, int k, int n) {
 }
 
 static int bf16_nld_b_sweep(void) {
-    printf("\n=== BF16 No-load-bf16 Correctness Sweep ===\n");
     int M_sizes[] = {1,2,3,4,5,6,7, 8,9,10,11,12,13,14,15,
                      16,17,18,19,20,21,22,23,
                      24,31,32,33,39,40,41,47,48,49,55,56,57,63,64,65};
@@ -573,7 +565,7 @@ static int bf16_nld_b_sweep(void) {
                     failed++;
                 }
             }
-    printf("BF16_NLD_B: %d/%d passed\n\n", total - failed, total);
+    printf("  bf16_nld_b:   %d/%d\n", total - failed, total);
     return failed;
 }
 // I8 precision
@@ -680,7 +672,6 @@ static int i8_verify(const I8_Type* A, const I8_Type* B_orig,
                        i, j, C_result[i * n + j], ref[i * n + j]);
                 ok = 0;
             }
-    if (ok) printf("  I8 OK\n");
     free(ref);
     return ok;
 }
@@ -710,7 +701,6 @@ static int i8_test_single(int m, int k, int n) {
 }
 
 static int i8_sweep(void) {
-    printf("\n=== I8 Tail Correctness Sweep ===\n");
     int M_sizes[] = {1,2,3,4,5,6,7, 8,9,10,11,12,13,14,15,
                      16,17,18,19,20,21,22,23,
                      24,31,32,33,39,40,41,47,48,49,55,56,57,63,64,65};
@@ -727,7 +717,7 @@ static int i8_sweep(void) {
                     failed++;
                 }
             }
-    printf("I8: %d/%d passed\n\n", total - failed, total);
+    printf("  i8_i32:       %d/%d\n", total - failed, total);
     return failed;
 }
 
@@ -790,7 +780,6 @@ static int i8_f_verify(const I8_Type* A, const I8_Type* B_orig,
                 ok = 0;
             }
         }
-    if (ok) printf("  I8_F OK\n");
     free(ref_i32);
     return ok;
 }
@@ -820,7 +809,6 @@ static int i8_f_test_single(int m, int k, int n) {
 }
 
 static int i8_f_sweep(void) {
-    printf("\n=== I8 Store-fp32 Correctness Sweep ===\n");
     int M_sizes[] = {1,2,3,4,5,6,7, 8,9,10,11,12,13,14,15,
                      16,17,18,19,20,21,22,23,
                      24,31,32,33,39,40,41,47,48,49,55,56,57,63,64,65};
@@ -837,7 +825,7 @@ static int i8_f_sweep(void) {
                     failed++;
                 }
             }
-    printf("I8_F: %d/%d passed\n\n", total - failed, total);
+    printf("  i8_fp32:      %d/%d\n", total - failed, total);
     return failed;
 }
 
@@ -926,7 +914,6 @@ static int i8_bias_f_verify(const I8_Type* A, const I8_Type* B_orig,
                 ok = 0;
             }
         }
-    if (ok) printf("  I8_BIAS_F OK\n");
     free(ref_i32);
     return ok;
 }
@@ -961,7 +948,6 @@ static int i8_bias_f_test_single(int m, int k, int n) {
 }
 
 static int i8_bias_f_sweep(void) {
-    printf("\n=== I8 Bias-fp32 Correctness Sweep ===\n");
     int M_sizes[] = {1,2,3,4,5,6,7, 8,9,10,11,12,13,14,15,
                      16,17,18,19,20,21,22,23,
                      24,31,32,33,39,40,41,47,48,49,55,56,57,63,64,65};
@@ -978,7 +964,7 @@ static int i8_bias_f_sweep(void) {
                     failed++;
                 }
             }
-    printf("I8_BIAS_F: %d/%d passed\n\n", total - failed, total);
+    printf("  i8_bias_f:    %d/%d\n", total - failed, total);
     return failed;
 }
 
@@ -995,6 +981,8 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Usage: %s [bf16|bf16bias|bf16nld|i8|i8f|i8bias|all]\n", argv[0]);
         return 1;
     }
+
+    printf("=== correctness test start ===\n");
 
     int total_failed = 0;
 
@@ -1018,10 +1006,12 @@ int main(int argc, char *argv[]) {
         total_failed += bf16_nld_b_sweep();
     }
 
+    printf("=== correctness test end ===\n");
+
     if (total_failed > 0) {
         printf("*** %d FAILURES ***\n", total_failed);
         return 1;
     }
-    printf("All tests passed.\n");
+    printf("All passed.\n");
     return 0;
 }
