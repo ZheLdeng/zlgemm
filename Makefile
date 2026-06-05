@@ -26,12 +26,21 @@
 #
 # Build requirements: ARMv8.6-A + BF16 + I8MM, OpenMP, math lib.
 # ═══════════════════════════════════════════════════════════════════════════
-ARCH_FLAGS = -march=armv8.6-a+bf16+i8mm
-COMMON_FLAGS = -O2 -Wall
+SHELL := /bin/bash
+.SHELLFLAGS := -o pipefail -c
+
+CC ?= cc
+ARCH_FLAGS ?= -march=armv8.6-a+bf16+i8mm
+COMMON_FLAGS ?= -O2 -Wall
+CFLAGS ?= $(ARCH_FLAGS) $(COMMON_FLAGS)
+LDFLAGS ?=
+LDLIBS ?= -lm
+OMP_FLAGS ?= -fopenmp
 ASM_I8 = i8gemm_k.S i8gemm_k_bias.S
 ASM_BF16 = bf16gemm_k.S bf16gemm_k_bias.S
 ALL_ASM = $(ASM_I8) $(ASM_BF16)
 MT_SRC = bf16gemm_mt.c i8gemm_mt.c
+COMMON_HEADERS = gemm_params.h
 
 # ── CPU binding ──
 # c  overrides core(s) for taskset:  make bench c=65   make mt c=64-78   make mt c=64,67,68
@@ -48,11 +57,11 @@ test: test_correctness
 	./test_correctness 2>&1 | tee test_correctness.log
 
 bench: bench_perf
-	taskset -c $(or $(c),0) ./bench_perf shape.csv 2>&1 | tee bench_perf.log
+	taskset -c $(or $(c),0) ./bench_perf $(CSV) 2>&1 | tee bench_perf.log
 
 # ── Multi-threaded sweep targets ──
 # Sweep all shapes from shape.csv, each with all thread counts < ncores.
-# Override CSV with e.g.  make mt CSV=my_shapes.csv
+# Override CSV with e.g.  make bench CSV=my_shapes.csv  or  make mt CSV=my_shapes.csv
 CSV ?= shape.csv
 
 mt: bench_perf
@@ -64,16 +73,16 @@ mt-bf16: bench_perf
 mt-i8: bench_perf
 	taskset -c $(or $(c),0-$(LAST)) ./bench_perf --mt-sweep-csv-i8 $(CSV) 2>&1 | tee mt_sweep.log
 
-test_correctness: test_correctness.c $(ALL_ASM)
-	cc -o $@ $^ $(ARCH_FLAGS) $(COMMON_FLAGS) -lm
+test_correctness: test_correctness.c $(COMMON_HEADERS) $(ALL_ASM)
+	$(CC) -o $@ $(filter %.c %.S,$^) $(CFLAGS) $(LDFLAGS) $(LDLIBS)
 
 # bench_perf links bf16gemm_mt.c for multi-threaded mode
-bench_perf: bench_perf.c $(MT_SRC) $(ALL_ASM)
-	cc -o $@ $^ $(ARCH_FLAGS) $(COMMON_FLAGS) -fopenmp -lm
+bench_perf: bench_perf.c $(MT_SRC) $(COMMON_HEADERS) i8gemm.h bf16gemm.h $(ALL_ASM)
+	$(CC) -o $@ $(filter %.c %.S,$^) $(CFLAGS) $(OMP_FLAGS) $(LDFLAGS) $(LDLIBS)
 
 # Legacy: original i8 test (no tail, no bf16)
 calculatei8mm: calculatei8mm.c i8gemm_k_ld.S
-	cc -o $@ $^ -march=armv8.6-a+i8mm -O2 -Wall
+	$(CC) -o $@ $^ -march=armv8.6-a+i8mm $(COMMON_FLAGS)
 
 check: test_correctness
 	./test_correctness 2>&1 | tee test_correctness.log

@@ -20,6 +20,8 @@
 #include <stdint.h>
 #include <omp.h>
 
+#include "gemm_params.h"
+
 // ═══════════════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════════════
@@ -31,17 +33,17 @@ typedef float    f32_t;
 // Kernel declarations (from i8gemm_k.S)
 // ═══════════════════════════════════════════════════════════════════════
 void i8gemm_k_ld (const i8_t *A, const i8_t *B_reo,
-                  i32_t *C, int m, int k, int n,
-                  i8_t *A_reorder, int lda, int ldb, int ldc);
+                  i32_t *C, i8_t *A_reorder,
+                  const gemm_params_t *params);
 void i8gemm_k_ld1(const i8_t *A, const i8_t *B_reo,
-                  i32_t *C, int m, int k, int n,
-                  i8_t *A_reorder, int lda, int ldb, int ldc);
+                  i32_t *C, i8_t *A_reorder,
+                  const gemm_params_t *params);
 void i8gemm_k_ld2(const i8_t *A, const i8_t *B_reo,
-                  i32_t *C, int m, int k, int n,
-                  i8_t *A_reorder, int lda, int ldb, int ldc);
+                  i32_t *C, i8_t *A_reorder,
+                  const gemm_params_t *params);
 void i8gemm_k_ld4(const i8_t *A, const i8_t *B_reo,
-                  i32_t *C, int m, int k, int n,
-                  i8_t *A_reorder, int lda, int ldb, int ldc);
+                  i32_t *C, i8_t *A_reorder,
+                  const gemm_params_t *params);
 
 // ═══════════════════════════════════════════════════════════════════════
 // i8_pack_B — Pack B matrix for smmla kernel (caller allocates B_reo)
@@ -74,14 +76,14 @@ void i8_pack_B(const i8_t *B, i8_t *B_reo, int K, int N) {
 static void i8_dispatch(const i8_t *A, const i8_t *B_reo,
                          i32_t *C, int m, int k, int n,
                          i8_t *A_reorder, int ldc_global) {
-    int lda = k;  // byte stride (int8 = 1 byte/elem)
-    int ldb = k;
+    volatile gemm_params_t p;
+    p.lda = k;  p.ldb = k;  p.ldc = ldc_global;
     int processed = 0;
 
     int m_full = (m / 8) * 8;
     if (m_full > 0) {
-        i8gemm_k_ld(A, B_reo, C, m_full, k, n,
-                    A_reorder, lda, ldb, ldc_global);
+        p.m = m_full;  p.k = k;  p.n = n;
+        i8gemm_k_ld(A, B_reo, C, A_reorder, (const gemm_params_t *)&p);
         processed = m_full;
     }
 
@@ -93,21 +95,24 @@ static void i8_dispatch(const i8_t *A, const i8_t *B_reo,
     i8_t *A_reo_t  = A_reorder + (uint64_t)processed * k;
 
     if (m_rem >= 4) {
-        i8gemm_k_ld4(At, B_reo, Ct, 4, k, n, A_reo_t, lda, ldb, ldc_global);
+        p.m = 4;  p.k = k;  p.n = n;
+        i8gemm_k_ld4(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
         processed += 4; m_rem -= 4;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * ldc_global;
         A_reo_t = A_reorder + (uint64_t)processed * k;
     }
     if (m_rem >= 2) {
-        i8gemm_k_ld2(At, B_reo, Ct, 2, k, n, A_reo_t, lda, ldb, ldc_global);
+        p.m = 2;  p.k = k;  p.n = n;
+        i8gemm_k_ld2(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
         processed += 2; m_rem -= 2;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * ldc_global;
         A_reo_t = A_reorder + (uint64_t)processed * k;
     }
     if (m_rem >= 1) {
-        i8gemm_k_ld1(At, B_reo, Ct, 1, k, n, A_reo_t, lda, ldb, ldc_global);
+        p.m = 1;  p.k = k;  p.n = n;
+        i8gemm_k_ld1(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
     }
 }
 
@@ -179,7 +184,7 @@ static void tile_N_i8(const i8_t *A, const i8_t *B_reo,
             int my_n_start = start_block * 8;
 
             i8_t *my_A_reo = (i8_t *)aligned_alloc(64,
-                (size_t)M * K_r * sizeof(i8_t));
+                (size_t)M * K_r * sizeof(i8_t) * 2);
             if (my_A_reo) {
                 // B: each N-block = K_r * 8 int8 values (= K_r * 8 bytes)
                 const i8_t *my_B = B_reo + (uint64_t)start_block * K_r * 8;
@@ -214,9 +219,11 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
     int M_blocks = M / 8;
 
     if (M_blocks >= num_threads) {
-        // M-tiling: one shared A_reorder pool, partitioned by M rows
+        // M-tiling: one shared A_reorder pool, partitioned by M rows.
+        // ld1 tail kernel writes zero-padded q-regs (2× expansion per row);
+        // use 2× allocation to avoid overflow for non-multiple-of-8 M.
         i8_t *A_reo_pool = (i8_t *)aligned_alloc(64,
-            (size_t)M * K_r * sizeof(i8_t));
+            (size_t)M * K_r * sizeof(i8_t) * 2);
         if (!A_reo_pool) return;
         tile_M_i8(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads);
         free(A_reo_pool);
@@ -293,29 +300,30 @@ void i8gemm_mt(const i8_t *A_orig, const i8_t *B_orig,
 
 // ── Kernel declarations (from i8gemm_k.S) ──────────────────────────
 void i8gemm_k_ld_f (const i8_t *A, const i8_t *B_reo,
-                    f32_t *C, int m, int k, int n,
-                    i8_t *A_reorder, int lda, int ldb, int ldc);
+                    f32_t *C, i8_t *A_reorder,
+                    const gemm_params_t *params);
 void i8gemm_k_ld1_f(const i8_t *A, const i8_t *B_reo,
-                    f32_t *C, int m, int k, int n,
-                    i8_t *A_reorder, int lda, int ldb, int ldc);
+                    f32_t *C, i8_t *A_reorder,
+                  const gemm_params_t *params);
 void i8gemm_k_ld2_f(const i8_t *A, const i8_t *B_reo,
-                    f32_t *C, int m, int k, int n,
-                    i8_t *A_reorder, int lda, int ldb, int ldc);
+                    f32_t *C, i8_t *A_reorder,
+                  const gemm_params_t *params);
 void i8gemm_k_ld4_f(const i8_t *A, const i8_t *B_reo,
-                    f32_t *C, int m, int k, int n,
-                    i8_t *A_reorder, int lda, int ldb, int ldc);
+                    f32_t *C, i8_t *A_reorder,
+                  const gemm_params_t *params);
 
 // ── i8_dispatch_f — Single-thread fp32 kernel dispatch ─────────────
 static void i8_dispatch_f(const i8_t *A, const i8_t *B_reo,
                            f32_t *C, int m, int k, int n,
                            i8_t *A_reorder, int ldc_global) {
-    int lda = k, ldb = k;
+    volatile gemm_params_t p;
+    p.lda = k;  p.ldb = k;  p.ldc = ldc_global;
     int processed = 0;
 
     int m_full = (m / 8) * 8;
     if (m_full > 0) {
-        i8gemm_k_ld_f(A, B_reo, C, m_full, k, n,
-                      A_reorder, lda, ldb, ldc_global);
+        p.m = m_full;  p.k = k;  p.n = n;
+        i8gemm_k_ld_f(A, B_reo, C, A_reorder, (const gemm_params_t *)&p);
         processed = m_full;
     }
 
@@ -327,21 +335,24 @@ static void i8_dispatch_f(const i8_t *A, const i8_t *B_reo,
     i8_t *A_reo_t  = A_reorder + (uint64_t)processed * k;
 
     if (m_rem >= 4) {
-        i8gemm_k_ld4_f(At, B_reo, Ct, 4, k, n, A_reo_t, lda, ldb, ldc_global);
+        p.m = 4;  p.k = k;  p.n = n;
+        i8gemm_k_ld4_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
         processed += 4; m_rem -= 4;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * ldc_global;
         A_reo_t = A_reorder + (uint64_t)processed * k;
     }
     if (m_rem >= 2) {
-        i8gemm_k_ld2_f(At, B_reo, Ct, 2, k, n, A_reo_t, lda, ldb, ldc_global);
+        p.m = 2;  p.k = k;  p.n = n;
+        i8gemm_k_ld2_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
         processed += 2; m_rem -= 2;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * ldc_global;
         A_reo_t = A_reorder + (uint64_t)processed * k;
     }
     if (m_rem >= 1) {
-        i8gemm_k_ld1_f(At, B_reo, Ct, 1, k, n, A_reo_t, lda, ldb, ldc_global);
+        p.m = 1;  p.k = k;  p.n = n;
+        i8gemm_k_ld1_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
     }
 }
 
@@ -409,7 +420,7 @@ static void tile_N_i8_f(const i8_t *A, const i8_t *B_reo,
             int my_n_start = start_block * 8;
 
             i8_t *my_A_reo = (i8_t *)aligned_alloc(64,
-                (size_t)M * K_r * sizeof(i8_t));
+                (size_t)M * K_r * sizeof(i8_t) * 2);
             if (my_A_reo) {
                 const i8_t *my_B = B_reo + (uint64_t)start_block * K_r * 8;
                 f32_t *my_C = C + my_n_start;
@@ -504,20 +515,20 @@ void i8gemm_mt_f(const i8_t *A_orig, const i8_t *B_orig,
 
 // ── Kernel declarations (from i8gemm_k_bias.S) ────────────────────────
 void i8gemm_k_ld_bias_f (const i8_t *A, const i8_t *B_reo,
-                          f32_t *C, int m, int k, int n,
-                          i8_t *A_reorder, int lda, int ldb, int ldc,
+                          f32_t *C, i8_t *A_reorder,
+                          const gemm_params_t *params,
                           const f32_t *bias);
 void i8gemm_k_ld1_bias_f(const i8_t *A, const i8_t *B_reo,
-                          f32_t *C, int m, int k, int n,
-                          i8_t *A_reorder, int lda, int ldb, int ldc,
+                          f32_t *C, i8_t *A_reorder,
+                          const gemm_params_t *params,
                           const f32_t *bias);
 void i8gemm_k_ld2_bias_f(const i8_t *A, const i8_t *B_reo,
-                          f32_t *C, int m, int k, int n,
-                          i8_t *A_reorder, int lda, int ldb, int ldc,
+                          f32_t *C, i8_t *A_reorder,
+                          const gemm_params_t *params,
                           const f32_t *bias);
 void i8gemm_k_ld4_bias_f(const i8_t *A, const i8_t *B_reo,
-                          f32_t *C, int m, int k, int n,
-                          i8_t *A_reorder, int lda, int ldb, int ldc,
+                          f32_t *C, i8_t *A_reorder,
+                          const gemm_params_t *params,
                           const f32_t *bias);
 
 // ── i8_dispatch_bias_f — Single-thread bias kernel dispatch ───────────
@@ -525,13 +536,14 @@ static void i8_dispatch_bias_f(const i8_t *A, const i8_t *B_reo,
                                 f32_t *C, int m, int k, int n,
                                 i8_t *A_reorder, int ldc_global,
                                 const f32_t *bias) {
-    int lda = k, ldb = k;
+    volatile gemm_params_t p;
+    p.lda = k;  p.ldb = k;  p.ldc = ldc_global;
     int processed = 0;
 
     int m_full = (m / 8) * 8;
     if (m_full > 0) {
-        i8gemm_k_ld_bias_f(A, B_reo, C, m_full, k, n,
-                           A_reorder, lda, ldb, ldc_global, bias);
+        p.m = m_full;  p.k = k;  p.n = n;
+        i8gemm_k_ld_bias_f(A, B_reo, C, A_reorder, (const gemm_params_t *)&p, bias);
         processed = m_full;
     }
 
@@ -543,24 +555,24 @@ static void i8_dispatch_bias_f(const i8_t *A, const i8_t *B_reo,
     i8_t *A_reo_t  = A_reorder + (uint64_t)processed * k;
 
     if (m_rem >= 4) {
-        i8gemm_k_ld4_bias_f(At, B_reo, Ct, 4, k, n, A_reo_t,
-                            lda, ldb, ldc_global, bias);
+        p.m = 4;  p.k = k;  p.n = n;
+        i8gemm_k_ld4_bias_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p, bias);
         processed += 4; m_rem -= 4;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * ldc_global;
         A_reo_t = A_reorder + (uint64_t)processed * k;
     }
     if (m_rem >= 2) {
-        i8gemm_k_ld2_bias_f(At, B_reo, Ct, 2, k, n, A_reo_t,
-                            lda, ldb, ldc_global, bias);
+        p.m = 2;  p.k = k;  p.n = n;
+        i8gemm_k_ld2_bias_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p, bias);
         processed += 2; m_rem -= 2;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * ldc_global;
         A_reo_t = A_reorder + (uint64_t)processed * k;
     }
     if (m_rem >= 1) {
-        i8gemm_k_ld1_bias_f(At, B_reo, Ct, 1, k, n, A_reo_t,
-                            lda, ldb, ldc_global, bias);
+        p.m = 1;  p.k = k;  p.n = n;
+        i8gemm_k_ld1_bias_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p, bias);
     }
 }
 
@@ -629,7 +641,7 @@ static void tile_N_i8_bias_f(const i8_t *A, const i8_t *B_reo,
             int my_n_start = start_block * 8;
 
             i8_t *my_A_reo = (i8_t *)aligned_alloc(64,
-                (size_t)M * K_r * sizeof(i8_t));
+                (size_t)M * K_r * sizeof(i8_t) * 2);
             if (my_A_reo) {
                 const i8_t   *my_B   = B_reo + (uint64_t)start_block * K_r * 8;
                 f32_t        *my_C   = C + my_n_start;

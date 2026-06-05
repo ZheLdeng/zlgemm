@@ -2,13 +2,8 @@
 // void i8gemm_k_ld(const int8_t  *A,            // x0  原始 A, M×K 行主序（大矩阵的子区域）
 //                  const int8_t  *B_reordered,  // x1  已 pack 的 B（大 packed B 的子区域）
 //                  int32_t       *C,            // x2  行主序输出（大矩阵的子区域）
-//                  int            m,            // x3  M 维度（8 的倍数；tail 固定 1/2/4）
-//                  int            k,            // x4  K 维度（16 的倍数）
-//                  int            n,            // x5  N 维度（8 的倍数）
-//                  int8_t        *A_reorder,    // x6  A 重排输出 buffer（m*k bytes）
-//                  int            lda,          // x7  A 的行间 byte stride（大 A 的 K, int8=1 byte）
-//                  int            ldb,          // [sp] K_big of packed B（用于 N-block stride）
-//                  int            ldc);         // [sp] C 的 leading dimension（int32 元素数）
+//                  int8_t        *A_reorder,    // x3  A 重排输出 buffer
+//                  const gemm_params_t *params);// x4  {m,k,n,lda,ldb,ldc} 结构体指针
 //
 // 循环顺序: M-N-K (最外层M, 中间N, 最内层K)
 // A 重排策略:
@@ -1008,13 +1003,15 @@ _\func_name:
 #endif
 	INIT
 
-#ifdef __APPLE__
-	ldr  w8,  [sp, #160]
-	ldr  w12, [sp, #164]
-#else
-	ldr  w8,  [sp, #160]
-	ldr  w12, [sp, #168]
-#endif
+	// New calling convention: x3 = A_REORDER, x4 = PARAMS
+	mov  A_REORDER, x3              // save A_REORDER → x6
+
+	// Load m,k,n,lda,ldb,ldc from params struct (6×int32 = 24 bytes)
+	mov  x11, x4                    // keep params pointer before K overwrites x4
+	ldp  w3, w4, [x11]              // M, K
+	ldp  w5, w7, [x11, #8]          // N, LDA (byte stride, no shift needed)
+	ldp  w8, w12, [x11, #16]        // LDB, LDC
+
 	lsl  LDC_B, x12, #\ldc_shift
 
 	mov  A_ORIG_M, A_ORIG

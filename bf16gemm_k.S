@@ -1,14 +1,9 @@
-// bf16gemm_k_ld.S
+// bf16gemm_k.S
 // void bf16gemm_k_ld(const uint16_t *A,            // x0  原始 A, M×K 行主序 bf16
-//                    const uint16_t *B_reordered,   // x1  已 pack 的 B
-//                    float         *C,              // x2  行主序输出 float32
-//                    int            m,              // x3  M 维度（8 的倍数）
-//                    int            k,              // x4  K 维度（8 的倍数）
-//                    int            n,              // x5  N 维度（8 的倍数）
-//                    uint16_t      *A_reorder,      // x6  A 重排输出 buffer（m*k*2 bytes）
-//                    int            lda,            // x7  A 的行间 element stride（大 A 的 K）
-//                    int            ldb,            // [sp] K_big of packed B（用于 N-block stride）
-//                    int            ldc);           // [sp] C 的 leading dimension（float32 元素数）
+//                    const uint16_t *B_reordered,  // x1  已 pack 的 B
+//                    float          *C,            // x2  行主序输出 float32
+//                    uint16_t       *A_reorder,    // x3  A 重排输出 buffer
+//                    const gemm_params_t *params); // x4  {m,k,n,lda,ldb,ldc} 结构体指针
 //
 // 循环顺序: M-N-K (最外层M, 中间N, 最内层K)
 // A 重排策略:
@@ -528,13 +523,15 @@ _\func_name:
 #endif
 	INIT
 
-#ifdef __APPLE__
-	ldr  w8,  [sp, #160]
-	ldr  w12, [sp, #164]
-#else
-	ldr  w8,  [sp, #160]
-	ldr  w12, [sp, #168]
-#endif
+	// New calling convention: x3 = A_REORDER, x4 = PARAMS
+	mov  A_REORDER, x3              // save A_REORDER → x6
+
+	// Load m,k,n,lda,ldb,ldc from params struct (6×int32 = 24 bytes)
+	mov  x11, x4                    // keep params pointer before K overwrites x4
+	ldp  w3, w4, [x11]              // M, K
+	ldp  w5, w7, [x11, #8]          // N, LDA
+	ldp  w8, w12, [x11, #16]        // LDB, LDC
+
 	lsl  LDC_B, x12, #\ldc_shift
 
 	lsl  LDA_B, LDA_B, #1        // LDA_B = lda * 2 (bytes)
@@ -1134,4 +1131,3 @@ GEMM_BODY bf16gemm_k_nld_b,  8, 8, LOAD_ZERO_8, STORE_C_ROWMAJOR_B, 1, 16
 GEMM_BODY bf16gemm_k_nld1_b, 1, 2, LOAD_ZERO_2, STORE_C_1_B,        1, 16
 GEMM_BODY bf16gemm_k_nld2_b, 2, 2, LOAD_ZERO_2, STORE_C_2_B,        1, 16
 GEMM_BODY bf16gemm_k_nld4_b, 4, 4, LOAD_ZERO_4, STORE_C_4_B,        1, 16
-

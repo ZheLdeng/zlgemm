@@ -2,10 +2,9 @@
 // Correctness test for bf16 and i8 tail-dispatch GEMM kernels.
 // Tests unified dispatch: 8-row full blocks (main kernel) + tail (ld4/ld2/ld1).
 //
-// Build:
-//   cc -o test_correctness test_correctness.c \
-//      i8gemm_k.S bf16gemm_k.S \
-//      -march=armv8.6-a+bf16+i8mm -O2 -Wall -lm
+// Build example:
+//   cc -o test_correctness test_correctness.c i8gemm_k.S bf16gemm_k.S
+//   cc flags: -march=armv8.6-a+bf16+i8mm -O2 -Wall -lm
 //
 // Usage:
 //   ./test_correctness [bf16|i8|all]   (default: all)
@@ -16,11 +15,7 @@
 #include <stdint.h>
 #include <assert.h>
 #include <math.h>
-
-// ═══════════════════════════════════════════════════════════════════════
-// Common helpers
-// ═══════════════════════════════════════════════════════════════════════
-static int is_power_of_two(int n) { return n > 0 && (n & (n - 1)) == 0; }
+#include "gemm_params.h"
 
 // ═══════════════════════════════════════════════════════════════════════
 // BF16 precision
@@ -57,32 +52,32 @@ static void bf16_ref_gemm(const BF16_Type* A, const BF16_Type* B,
         }
 }
 
-void bf16gemm_k_ld (const BF16_Type *A, const BF16_Type *B_reo,
-                    BF16_Accum *C, int m, int k, int n,
-                    BF16_Type *A_reorder, int lda, int ldb, int ldc);
+void bf16gemm_k_ld(const BF16_Type *A, const BF16_Type *B_reo,
+                 float *C, BF16_Type *A_reorder,
+                 const gemm_params_t *params);
 void bf16gemm_k_ld1(const BF16_Type *A, const BF16_Type *B_reo,
-                    BF16_Accum *C, int m, int k, int n,
-                    BF16_Type *A_reorder, int lda, int ldb, int ldc);
+                 float *C, BF16_Type *A_reorder,
+                 const gemm_params_t *params);
 void bf16gemm_k_ld2(const BF16_Type *A, const BF16_Type *B_reo,
-                    BF16_Accum *C, int m, int k, int n,
-                    BF16_Type *A_reorder, int lda, int ldb, int ldc);
+                 float *C, BF16_Type *A_reorder,
+                 const gemm_params_t *params);
 void bf16gemm_k_ld4(const BF16_Type *A, const BF16_Type *B_reo,
-                    BF16_Accum *C, int m, int k, int n,
-                    BF16_Type *A_reorder, int lda, int ldb, int ldc);
+                 float *C, BF16_Type *A_reorder,
+                 const gemm_params_t *params);
 
 // bf16-store variants: C is bf16* instead of float*
-void bf16gemm_k_ld_b (const BF16_Type *A, const BF16_Type *B_reo,
-                      BF16_Type *C, int m, int k, int n,
-                      BF16_Type *A_reorder, int lda, int ldb, int ldc);
+void bf16gemm_k_ld_b(const BF16_Type *A, const BF16_Type *B_reo,
+                 BF16_Type *C, BF16_Type *A_reorder,
+                 const gemm_params_t *params);
 void bf16gemm_k_ld1_b(const BF16_Type *A, const BF16_Type *B_reo,
-                      BF16_Type *C, int m, int k, int n,
-                      BF16_Type *A_reorder, int lda, int ldb, int ldc);
+                 BF16_Type *C, BF16_Type *A_reorder,
+                 const gemm_params_t *params);
 void bf16gemm_k_ld2_b(const BF16_Type *A, const BF16_Type *B_reo,
-                      BF16_Type *C, int m, int k, int n,
-                      BF16_Type *A_reorder, int lda, int ldb, int ldc);
+                 BF16_Type *C, BF16_Type *A_reorder,
+                 const gemm_params_t *params);
 void bf16gemm_k_ld4_b(const BF16_Type *A, const BF16_Type *B_reo,
-                      BF16_Type *C, int m, int k, int n,
-                      BF16_Type *A_reorder, int lda, int ldb, int ldc);
+                 BF16_Type *C, BF16_Type *A_reorder,
+                 const gemm_params_t *params);
 
 static void bf16_reorder_B(const BF16_Type* B, BF16_Type* B_reo,
                             int K, int N) {
@@ -101,16 +96,16 @@ static void bf16_reorder_B(const BF16_Type* B, BF16_Type* B_reo,
         }
 }
 
-static void bf16_dispatch(const BF16_Type *A, const BF16_Type *B_reo,
+__attribute__((noinline)) static void bf16_dispatch(const BF16_Type *A, const BF16_Type *B_reo,
                            BF16_Accum *C, int m, int k, int n,
                            BF16_Type *A_reorder) {
-    int lda = k, ldb = k, ldc = n;
+    volatile gemm_params_t p;
     int processed = 0;
 
     int m_full = (m / 8) * 8;
     if (m_full > 0) {
-        bf16gemm_k_ld(A, B_reo, C, m_full, k, n,
-                      A_reorder, lda, ldb, ldc);
+        p.m = m_full;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        bf16gemm_k_ld(A, B_reo, C, A_reorder, (const gemm_params_t *)&p);
         processed = m_full;
     }
 
@@ -122,21 +117,24 @@ static void bf16_dispatch(const BF16_Type *A, const BF16_Type *B_reo,
     BF16_Type *A_reo_t  = A_reorder + (uint64_t)processed * k;
 
     if (m_rem >= 4) {
-        bf16gemm_k_ld4(At, B_reo, Ct, 4, k, n, A_reo_t, lda, ldb, ldc);
+        p.m = 4;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        bf16gemm_k_ld4(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
         processed += 4; m_rem -= 4;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * n;
         A_reo_t = A_reorder + (uint64_t)processed * k;
     }
     if (m_rem >= 2) {
-        bf16gemm_k_ld2(At, B_reo, Ct, 2, k, n, A_reo_t, lda, ldb, ldc);
+        p.m = 2;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        bf16gemm_k_ld2(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
         processed += 2; m_rem -= 2;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * n;
         A_reo_t = A_reorder + (uint64_t)processed * k;
     }
     if (m_rem >= 1) {
-        bf16gemm_k_ld1(At, B_reo, Ct, 1, k, n, A_reo_t, lda, ldb, ldc);
+        p.m = 1;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        bf16gemm_k_ld1(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
     }
 }
 
@@ -163,6 +161,7 @@ static int bf16_verify(const BF16_Type* A, const BF16_Type* B_orig,
 }
 
 static int bf16_test_single(int m, int k, int n) {
+    fprintf(stderr, "  bf16_test_single m=%d k=%d n=%d\n", m, k, n);
     int k_r = ((k + 7) / 8) * 8; if (k_r < 8)  k_r = 8;
     int n_r = ((n + 7) / 8) * 8; if (n_r < 8)  n_r = 8;
 
@@ -212,15 +211,15 @@ static int bf16_sweep(void) {
 // BF16 bf16-store (_b suffix): C output is bf16 instead of float32
 // ═══════════════════════════════════════════════════════════════════════
 
-static void bf16_b_dispatch(const BF16_Type *A, const BF16_Type *B_reo,
+__attribute__((noinline)) static void bf16_b_dispatch(const BF16_Type *A, const BF16_Type *B_reo,
                              BF16_Type *C, int m, int k, int n,
                              BF16_Type *A_reorder) {
-    int lda = k, ldb = k, ldc = n;
+    volatile gemm_params_t p;
     int processed = 0;
     int m_full = (m / 8) * 8;
     if (m_full > 0) {
-        bf16gemm_k_ld_b(A, B_reo, C, m_full, k, n,
-                        A_reorder, lda, ldb, ldc);
+        p.m = m_full;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        bf16gemm_k_ld_b(A, B_reo, C, A_reorder, (const gemm_params_t *)&p);
         processed = m_full;
     }
     int m_rem = m - processed;
@@ -229,21 +228,25 @@ static void bf16_b_dispatch(const BF16_Type *A, const BF16_Type *B_reo,
     BF16_Type       *Ct = C     + (uint64_t)processed * n;
     BF16_Type *A_reo_t  = A_reorder + (uint64_t)processed * k;
     if (m_rem >= 4) {
-        bf16gemm_k_ld4_b(At, B_reo, Ct, 4, k, n, A_reo_t, lda, ldb, ldc);
+        p.m = 4;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        bf16gemm_k_ld4_b(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
         processed += 4; m_rem -= 4;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * n;
         A_reo_t = A_reorder + (uint64_t)processed * k;
     }
     if (m_rem >= 2) {
-        bf16gemm_k_ld2_b(At, B_reo, Ct, 2, k, n, A_reo_t, lda, ldb, ldc);
+        p.m = 2;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        bf16gemm_k_ld2_b(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
         processed += 2; m_rem -= 2;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * n;
         A_reo_t = A_reorder + (uint64_t)processed * k;
     }
-    if (m_rem >= 1)
-        bf16gemm_k_ld1_b(At, B_reo, Ct, 1, k, n, A_reo_t, lda, ldb, ldc);
+    if (m_rem >= 1) {
+        p.m = 1;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        bf16gemm_k_ld1_b(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
+    }
 }
 
 static int bf16_b_verify(const BF16_Type* A, const BF16_Type* B_orig,
@@ -317,33 +320,33 @@ static int bf16_b_sweep(void) {
 // ═══════════════════════════════════════════════════════════════════════
 
 // BF16 bias kernel declarations (from bf16gemm_k_bias.S)
-void bf16gemm_k_ld_bias_f (const BF16_Type *A, const BF16_Type *B_reo,
-                            BF16_Accum *C, int m, int k, int n,
-                            BF16_Type *A_reorder, int lda, int ldb, int ldc,
-                            const float *bias);
+void bf16gemm_k_ld_bias_f(const BF16_Type *A, const BF16_Type *B_reo,
+                 float *C, BF16_Type *A_reorder,
+                 const gemm_params_t *params,
+                 const float *bias);
 void bf16gemm_k_ld1_bias_f(const BF16_Type *A, const BF16_Type *B_reo,
-                            BF16_Accum *C, int m, int k, int n,
-                            BF16_Type *A_reorder, int lda, int ldb, int ldc,
-                            const float *bias);
+                 float *C, BF16_Type *A_reorder,
+                 const gemm_params_t *params,
+                 const float *bias);
 void bf16gemm_k_ld2_bias_f(const BF16_Type *A, const BF16_Type *B_reo,
-                            BF16_Accum *C, int m, int k, int n,
-                            BF16_Type *A_reorder, int lda, int ldb, int ldc,
-                            const float *bias);
+                 float *C, BF16_Type *A_reorder,
+                 const gemm_params_t *params,
+                 const float *bias);
 void bf16gemm_k_ld4_bias_f(const BF16_Type *A, const BF16_Type *B_reo,
-                            BF16_Accum *C, int m, int k, int n,
-                            BF16_Type *A_reorder, int lda, int ldb, int ldc,
-                            const float *bias);
+                 float *C, BF16_Type *A_reorder,
+                 const gemm_params_t *params,
+                 const float *bias);
 
-static void bf16_bias_f_dispatch(const BF16_Type *A, const BF16_Type *B_reo,
+__attribute__((noinline)) static void bf16_bias_f_dispatch(const BF16_Type *A, const BF16_Type *B_reo,
                                   BF16_Accum *C, int m, int k, int n,
                                   BF16_Type *A_reorder, const float *bias) {
-    int lda = k, ldb = k, ldc = n;
+    volatile gemm_params_t p;
     int processed = 0;
 
     int m_full = (m / 8) * 8;
     if (m_full > 0) {
-        bf16gemm_k_ld_bias_f(A, B_reo, C, m_full, k, n,
-                             A_reorder, lda, ldb, ldc, bias);
+        p.m = m_full;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        bf16gemm_k_ld_bias_f(A, B_reo, C, A_reorder, (const gemm_params_t *)&p, bias);
         processed = m_full;
     }
 
@@ -355,24 +358,24 @@ static void bf16_bias_f_dispatch(const BF16_Type *A, const BF16_Type *B_reo,
     BF16_Type *A_reo_t  = A_reorder + (uint64_t)processed * k;
 
     if (m_rem >= 4) {
-        bf16gemm_k_ld4_bias_f(At, B_reo, Ct, 4, k, n, A_reo_t,
-                              lda, ldb, ldc, bias);
+        p.m = 4;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        bf16gemm_k_ld4_bias_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p, bias);
         processed += 4; m_rem -= 4;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * n;
         A_reo_t = A_reorder + (uint64_t)processed * k;
     }
     if (m_rem >= 2) {
-        bf16gemm_k_ld2_bias_f(At, B_reo, Ct, 2, k, n, A_reo_t,
-                              lda, ldb, ldc, bias);
+        p.m = 2;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        bf16gemm_k_ld2_bias_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p, bias);
         processed += 2; m_rem -= 2;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * n;
         A_reo_t = A_reorder + (uint64_t)processed * k;
     }
     if (m_rem >= 1) {
-        bf16gemm_k_ld1_bias_f(At, B_reo, Ct, 1, k, n, A_reo_t,
-                              lda, ldb, ldc, bias);
+        p.m = 1;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        bf16gemm_k_ld1_bias_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p, bias);
     }
 }
 
@@ -459,28 +462,28 @@ static int bf16_bias_f_sweep(void) {
 // ═══════════════════════════════════════════════════════════════════════
 
 // nld_b kernel declarations (from bf16gemm_k.S)
-void bf16gemm_k_nld_b (const BF16_Type *A, const BF16_Type *B_reo,
-                        BF16_Type *C, int m, int k, int n,
-                        BF16_Type *A_reorder, int lda, int ldb, int ldc);
+void bf16gemm_k_nld_b(const BF16_Type *A, const BF16_Type *B_reo,
+                 BF16_Type *C, BF16_Type *A_reorder,
+                 const gemm_params_t *params);
 void bf16gemm_k_nld1_b(const BF16_Type *A, const BF16_Type *B_reo,
-                        BF16_Type *C, int m, int k, int n,
-                        BF16_Type *A_reorder, int lda, int ldb, int ldc);
+                 BF16_Type *C, BF16_Type *A_reorder,
+                 const gemm_params_t *params);
 void bf16gemm_k_nld2_b(const BF16_Type *A, const BF16_Type *B_reo,
-                        BF16_Type *C, int m, int k, int n,
-                        BF16_Type *A_reorder, int lda, int ldb, int ldc);
+                 BF16_Type *C, BF16_Type *A_reorder,
+                 const gemm_params_t *params);
 void bf16gemm_k_nld4_b(const BF16_Type *A, const BF16_Type *B_reo,
-                        BF16_Type *C, int m, int k, int n,
-                        BF16_Type *A_reorder, int lda, int ldb, int ldc);
+                 BF16_Type *C, BF16_Type *A_reorder,
+                 const gemm_params_t *params);
 
-static void bf16_nld_b_dispatch(const BF16_Type *A, const BF16_Type *B_reo,
+__attribute__((noinline)) static void bf16_nld_b_dispatch(const BF16_Type *A, const BF16_Type *B_reo,
                                  BF16_Type *C, int m, int k, int n,
                                  BF16_Type *A_reorder) {
-    int lda = k, ldb = k, ldc = n;
+    volatile gemm_params_t p;
     int processed = 0;
     int m_full = (m / 8) * 8;
     if (m_full > 0) {
-        bf16gemm_k_nld_b(A, B_reo, C, m_full, k, n,
-                         A_reorder, lda, ldb, ldc);
+        p.m = m_full;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        bf16gemm_k_nld_b(A, B_reo, C, A_reorder, (const gemm_params_t *)&p);
         processed = m_full;
     }
     int m_rem = m - processed;
@@ -489,21 +492,25 @@ static void bf16_nld_b_dispatch(const BF16_Type *A, const BF16_Type *B_reo,
     BF16_Type       *Ct = C     + (uint64_t)processed * n;
     BF16_Type *A_reo_t  = A_reorder + (uint64_t)processed * k;
     if (m_rem >= 4) {
-        bf16gemm_k_nld4_b(At, B_reo, Ct, 4, k, n, A_reo_t, lda, ldb, ldc);
+        p.m = 4;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        bf16gemm_k_nld4_b(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
         processed += 4; m_rem -= 4;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * n;
         A_reo_t = A_reorder + (uint64_t)processed * k;
     }
     if (m_rem >= 2) {
-        bf16gemm_k_nld2_b(At, B_reo, Ct, 2, k, n, A_reo_t, lda, ldb, ldc);
+        p.m = 2;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        bf16gemm_k_nld2_b(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
         processed += 2; m_rem -= 2;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * n;
         A_reo_t = A_reorder + (uint64_t)processed * k;
     }
-    if (m_rem >= 1)
-        bf16gemm_k_nld1_b(At, B_reo, Ct, 1, k, n, A_reo_t, lda, ldb, ldc);
+    if (m_rem >= 1) {
+        p.m = 1;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        bf16gemm_k_nld1_b(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
+    }
 }
 
 static int bf16_nld_b_verify(const BF16_Type* A, const BF16_Type* B_orig,
@@ -574,32 +581,32 @@ typedef int32_t I8_Accum;
 typedef int8_t  I8_Type;
 typedef float    f32_t;
 
-void i8gemm_k_ld (const I8_Type *A, const I8_Type *B_reo,
-                  I8_Accum *C, int m, int k, int n,
-                  I8_Type *A_reorder, int lda, int ldb, int ldc);
+void i8gemm_k_ld(const I8_Type *A, const I8_Type *B_reo,
+                  I8_Accum *C, I8_Type *A_reorder,
+                  const gemm_params_t *params);
 void i8gemm_k_ld1(const I8_Type *A, const I8_Type *B_reo,
-                  I8_Accum *C, int m, int k, int n,
-                  I8_Type *A_reorder, int lda, int ldb, int ldc);
+                  I8_Accum *C, I8_Type *A_reorder,
+                  const gemm_params_t *params);
 void i8gemm_k_ld2(const I8_Type *A, const I8_Type *B_reo,
-                  I8_Accum *C, int m, int k, int n,
-                  I8_Type *A_reorder, int lda, int ldb, int ldc);
+                  I8_Accum *C, I8_Type *A_reorder,
+                  const gemm_params_t *params);
 void i8gemm_k_ld4(const I8_Type *A, const I8_Type *B_reo,
-                  I8_Accum *C, int m, int k, int n,
-                  I8_Type *A_reorder, int lda, int ldb, int ldc);
+                  I8_Accum *C, I8_Type *A_reorder,
+                  const gemm_params_t *params);
 
 // fp32-output variants (_f suffix): C is float*, A/B still int8
-void i8gemm_k_ld_f (const I8_Type *A, const I8_Type *B_reo,
-                    f32_t *C, int m, int k, int n,
-                    I8_Type *A_reorder, int lda, int ldb, int ldc);
+void i8gemm_k_ld_f(const I8_Type *A, const I8_Type *B_reo,
+                  float *C, I8_Type *A_reorder,
+                  const gemm_params_t *params);
 void i8gemm_k_ld1_f(const I8_Type *A, const I8_Type *B_reo,
-                    f32_t *C, int m, int k, int n,
-                    I8_Type *A_reorder, int lda, int ldb, int ldc);
+                  float *C, I8_Type *A_reorder,
+                  const gemm_params_t *params);
 void i8gemm_k_ld2_f(const I8_Type *A, const I8_Type *B_reo,
-                    f32_t *C, int m, int k, int n,
-                    I8_Type *A_reorder, int lda, int ldb, int ldc);
+                  float *C, I8_Type *A_reorder,
+                  const gemm_params_t *params);
 void i8gemm_k_ld4_f(const I8_Type *A, const I8_Type *B_reo,
-                    f32_t *C, int m, int k, int n,
-                    I8_Type *A_reorder, int lda, int ldb, int ldc);
+                  float *C, I8_Type *A_reorder,
+                  const gemm_params_t *params);
 
 static void i8_reorder_B(const I8_Type* B, I8_Type* B_reo, int K, int N) {
     assert(K % 8 == 0 && N % 8 == 0);
@@ -622,16 +629,16 @@ static void i8_ref_gemm(const I8_Type* A, const I8_Type* B,
         }
 }
 
-static void i8_dispatch(const I8_Type *A, const I8_Type *B_reo,
+__attribute__((noinline)) static void i8_dispatch(const I8_Type *A, const I8_Type *B_reo,
                          I8_Accum *C, int m, int k, int n,
                          I8_Type *A_reorder) {
-    int lda = k, ldb = k, ldc = n;
+    volatile gemm_params_t p;
     int processed = 0;
 
     int m_full = (m / 8) * 8;
     if (m_full > 0) {
-        i8gemm_k_ld(A, B_reo, C, m_full, k, n,
-                    A_reorder, lda, ldb, ldc);
+        p.m = m_full;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        i8gemm_k_ld(A, B_reo, C, A_reorder, (const gemm_params_t *)&p);
         processed = m_full;
     }
 
@@ -643,19 +650,22 @@ static void i8_dispatch(const I8_Type *A, const I8_Type *B_reo,
     I8_Type *A_reo_t  = A_reorder + processed * k;
 
     if (m_rem >= 4) {
-        i8gemm_k_ld4(At, B_reo, Ct, 4, k, n, A_reo_t, lda, ldb, ldc);
+        p.m = 4;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        i8gemm_k_ld4(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
         processed += 4; m_rem -= 4;
         At = A + processed * k; Ct = C + processed * n;
         A_reo_t = A_reorder + processed * k;
     }
     if (m_rem >= 2) {
-        i8gemm_k_ld2(At, B_reo, Ct, 2, k, n, A_reo_t, lda, ldb, ldc);
+        p.m = 2;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        i8gemm_k_ld2(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
         processed += 2; m_rem -= 2;
         At = A + processed * k; Ct = C + processed * n;
         A_reo_t = A_reorder + processed * k;
     }
     if (m_rem >= 1) {
-        i8gemm_k_ld1(At, B_reo, Ct, 1, k, n, A_reo_t, lda, ldb, ldc);
+        p.m = 1;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        i8gemm_k_ld1(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
     }
 }
 
@@ -725,16 +735,16 @@ static int i8_sweep(void) {
 // I8 fp32-output (_f suffix) correctness tests
 // ═══════════════════════════════════════════════════════════════════════
 
-static void i8_f_dispatch(const I8_Type *A, const I8_Type *B_reo,
-                           f32_t *C, int m, int k, int n,
+__attribute__((noinline)) static void i8_f_dispatch(const I8_Type *A, const I8_Type *B_reo,
+                           float *C, int m, int k, int n,
                            I8_Type *A_reorder) {
-    int lda = k, ldb = k, ldc = n;
+    volatile gemm_params_t p;
     int processed = 0;
 
     int m_full = (m / 8) * 8;
     if (m_full > 0) {
-        i8gemm_k_ld_f(A, B_reo, C, m_full, k, n,
-                      A_reorder, lda, ldb, ldc);
+        p.m = m_full;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        i8gemm_k_ld_f(A, B_reo, C, A_reorder, (const gemm_params_t *)&p);
         processed = m_full;
     }
 
@@ -746,19 +756,22 @@ static void i8_f_dispatch(const I8_Type *A, const I8_Type *B_reo,
     I8_Type *A_reo_t  = A_reorder + processed * k;
 
     if (m_rem >= 4) {
-        i8gemm_k_ld4_f(At, B_reo, Ct, 4, k, n, A_reo_t, lda, ldb, ldc);
+        p.m = 4;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        i8gemm_k_ld4_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
         processed += 4; m_rem -= 4;
         At = A + processed * k; Ct = C + processed * n;
         A_reo_t = A_reorder + processed * k;
     }
     if (m_rem >= 2) {
-        i8gemm_k_ld2_f(At, B_reo, Ct, 2, k, n, A_reo_t, lda, ldb, ldc);
+        p.m = 2;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        i8gemm_k_ld2_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
         processed += 2; m_rem -= 2;
         At = A + processed * k; Ct = C + processed * n;
         A_reo_t = A_reorder + processed * k;
     }
     if (m_rem >= 1) {
-        i8gemm_k_ld1_f(At, B_reo, Ct, 1, k, n, A_reo_t, lda, ldb, ldc);
+        p.m = 1;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        i8gemm_k_ld1_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
     }
 }
 
@@ -837,33 +850,33 @@ static int i8_f_sweep(void) {
 // ═══════════════════════════════════════════════════════════════════════
 
 // Bias kernel declarations (from i8gemm_k_bias.S)
-void i8gemm_k_ld_bias_f (const I8_Type *A, const I8_Type *B_reo,
-                          f32_t *C, int m, int k, int n,
-                          I8_Type *A_reorder, int lda, int ldb, int ldc,
-                          const f32_t *bias);
+void i8gemm_k_ld_bias_f(const I8_Type *A, const I8_Type *B_reo,
+                          float *C, I8_Type *A_reorder,
+                          const gemm_params_t *params,
+                          const float *bias);
 void i8gemm_k_ld1_bias_f(const I8_Type *A, const I8_Type *B_reo,
-                          f32_t *C, int m, int k, int n,
-                          I8_Type *A_reorder, int lda, int ldb, int ldc,
-                          const f32_t *bias);
+                          float *C, I8_Type *A_reorder,
+                          const gemm_params_t *params,
+                          const float *bias);
 void i8gemm_k_ld2_bias_f(const I8_Type *A, const I8_Type *B_reo,
-                          f32_t *C, int m, int k, int n,
-                          I8_Type *A_reorder, int lda, int ldb, int ldc,
-                          const f32_t *bias);
+                          float *C, I8_Type *A_reorder,
+                          const gemm_params_t *params,
+                          const float *bias);
 void i8gemm_k_ld4_bias_f(const I8_Type *A, const I8_Type *B_reo,
-                          f32_t *C, int m, int k, int n,
-                          I8_Type *A_reorder, int lda, int ldb, int ldc,
-                          const f32_t *bias);
+                          float *C, I8_Type *A_reorder,
+                          const gemm_params_t *params,
+                          const float *bias);
 
-static void i8_bias_f_dispatch(const I8_Type *A, const I8_Type *B_reo,
-                                f32_t *C, int m, int k, int n,
-                                I8_Type *A_reorder, const f32_t *bias) {
-    int lda = k, ldb = k, ldc = n;
+__attribute__((noinline)) static void i8_bias_f_dispatch(const I8_Type *A, const I8_Type *B_reo,
+                                float *C, int m, int k, int n,
+                                I8_Type *A_reorder, const float *bias) {
+    volatile gemm_params_t p;
     int processed = 0;
 
     int m_full = (m / 8) * 8;
     if (m_full > 0) {
-        i8gemm_k_ld_bias_f(A, B_reo, C, m_full, k, n,
-                           A_reorder, lda, ldb, ldc, bias);
+        p.m = m_full;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        i8gemm_k_ld_bias_f(A, B_reo, C, A_reorder, (const gemm_params_t *)&p, bias);
         processed = m_full;
     }
 
@@ -875,22 +888,22 @@ static void i8_bias_f_dispatch(const I8_Type *A, const I8_Type *B_reo,
     I8_Type *A_reo_t  = A_reorder + processed * k;
 
     if (m_rem >= 4) {
-        i8gemm_k_ld4_bias_f(At, B_reo, Ct, 4, k, n, A_reo_t,
-                            lda, ldb, ldc, bias);
+        p.m = 4;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        i8gemm_k_ld4_bias_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p, bias);
         processed += 4; m_rem -= 4;
         At = A + processed * k; Ct = C + processed * n;
         A_reo_t = A_reorder + processed * k;
     }
     if (m_rem >= 2) {
-        i8gemm_k_ld2_bias_f(At, B_reo, Ct, 2, k, n, A_reo_t,
-                            lda, ldb, ldc, bias);
+        p.m = 2;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        i8gemm_k_ld2_bias_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p, bias);
         processed += 2; m_rem -= 2;
         At = A + processed * k; Ct = C + processed * n;
         A_reo_t = A_reorder + processed * k;
     }
     if (m_rem >= 1) {
-        i8gemm_k_ld1_bias_f(At, B_reo, Ct, 1, k, n, A_reo_t,
-                            lda, ldb, ldc, bias);
+        p.m = 1;  p.k = k;  p.n = n;  p.lda = k;  p.ldb = k;  p.ldc = n;
+        i8gemm_k_ld1_bias_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p, bias);
     }
 }
 
@@ -982,11 +995,12 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    printf("=== correctness test start ===\n");
+    printf("=== correctness test start ===\n"); fflush(stdout);
 
     int total_failed = 0;
 
     if (strcmp(mode, "all") == 0 || strcmp(mode, "i8") == 0) {
+        printf("  starting i8_sweep...\n"); fflush(stdout);
         total_failed += i8_sweep();
     }
     if (strcmp(mode, "all") == 0 || strcmp(mode, "i8f") == 0) {
@@ -996,6 +1010,7 @@ int main(int argc, char *argv[]) {
         total_failed += i8_bias_f_sweep();
     }
     if (strcmp(mode, "all") == 0 || strcmp(mode, "bf16") == 0) {
+        printf("  starting bf16_sweep...\n"); fflush(stdout);
         total_failed += bf16_sweep();
         total_failed += bf16_b_sweep();
     }

@@ -1,15 +1,10 @@
 // bf16gemm_k_bias.S — bf16 GEMM kernel with fp32 bias addition (no C load)
 // void bf16gemm_k_ld_bias_f(const uint16_t *A,            // x0
 //                           const uint16_t *B_reordered,  // x1
-//                           float         *C,             // x2  fp32 output
-//                           int            m,             // x3  M (multiple of 8)
-//                           int            k,             // x4  K (multiple of 8)
-//                           int            n,             // x5  N (multiple of 8)
-//                           uint16_t      *A_reorder,     // x6  A reorder buffer
-//                           int            lda,           // x7  A row element stride
-//                           int            ldb,           // [sp] K_big of packed B
-//                           int            ldc,           // [sp] C leading dim (f32)
-//                           const float   *bias);         // [sp] bias[N] fp32
+//                           float          *C,            // x2  fp32 output
+//                           uint16_t       *A_reorder,    // x3  A reorder buffer
+//                           const gemm_params_t *params,  // x4  {m,k,n,lda,ldb,ldc}
+//                           const float    *bias);        // x5  bias[N] fp32
 //
 // Key design:
 //   - Accumulators zero-initialised (no C read)
@@ -17,11 +12,6 @@
 //   - STORE: zip (blocked→row-major) → ldp bias → fadd → stp
 //   - NO scvtf needed — accumulators are already fp32 (unlike i8 int32)
 //   - Bias is per-column, shared across rows; loaded once per N-block (8 values)
-//
-// AAPCS64 stack layout after INIT (Linux, 160 bytes pushed):
-//   sp+160: ldb  (4 bytes in 8-byte slot)
-//   sp+168: ldc  (4 bytes in 8-byte slot)
-//   sp+176: bias (8-byte pointer)
 
 	.text
 	.align 4
@@ -774,12 +764,17 @@ _\func_name:
 #endif
 	INIT
 
-	// Load stack parameters (Linux AAPCS64 offsets after INIT)
-#ifndef __APPLE__
-	ldr  w8,  [sp, #160]         // ldb
-	ldr  w12, [sp, #168]         // ldc
-	ldr  BIAS_ADDR, [sp, #176]   // bias pointer
-#endif
+	// New calling convention: x3 = A_REORDER, x4 = PARAMS, x5 = bias
+	mov  A_REORDER, x3              // save A_REORDER → x6
+	str  x5, [sp, #-16]!            // push original bias (for M-loop reload)
+	mov  BIAS_ADDR, x5              // current bias pointer → x21
+
+	// Load m,k,n,lda,ldb,ldc from params struct (6×int32 = 24 bytes)
+	mov  x11, x4                    // keep params pointer before K overwrites x4
+	ldp  w3, w4, [x11]              // M, K
+	ldp  w5, w7, [x11, #8]          // N, LDA
+	ldp  w8, w12, [x11, #16]        // LDB, LDC
+
 	lsl  LDC_B, x12, #\ldc_shift
 
 	lsl  LDA_B, LDA_B, #1        // LDA_B = lda * 2 (bytes)
@@ -790,7 +785,7 @@ _\func_name:
 	M_LOOP_BEGIN_\mrows
 
 	// Reset per-M-block state; reload bias pointer
-	ldr  BIAS_ADDR, [sp, #176]
+	ldr  BIAS_ADDR, [sp]            // reload original bias from our slot
 	mov  A_REORDER_M, A_REORDER
 	mov  FIRST_N, #1
 	mov  C_N_BASE, C_ROW_BASE
@@ -874,6 +869,7 @@ _\func_name:
 	M_LOOP_END_\mrows
 
 .L\func_name\()_end:
+	add  sp, sp, #16                // pop saved bias
 	RESTORE
 	ret
 
