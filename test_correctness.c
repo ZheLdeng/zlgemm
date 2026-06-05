@@ -474,6 +474,15 @@ void bf16gemm_k_nld2_b(const BF16_Type *A, const BF16_Type *B_reo,
 void bf16gemm_k_nld4_b(const BF16_Type *A, const BF16_Type *B_reo,
                  BF16_Type *C, BF16_Type *A_reorder,
                  const gemm_params_t *params);
+void bf16gemm_mt_nld_b(const BF16_Type *A_orig, const BF16_Type *B_orig,
+                 BF16_Type *C, int M, int K, int N,
+                 int num_threads);
+void bf16gemm_mt(const BF16_Type *A_orig, const BF16_Type *B_orig,
+                 float *C, int M, int K, int N,
+                 int num_threads);
+void bf16gemm_mt_bias_f(const BF16_Type *A_orig, const BF16_Type *B_orig,
+                        float *C, int M, int K, int N,
+                        int num_threads, const float *bias);
 
 __attribute__((noinline)) static void bf16_nld_b_dispatch(const BF16_Type *A, const BF16_Type *B_reo,
                                  BF16_Type *C, int m, int k, int n,
@@ -575,6 +584,184 @@ static int bf16_nld_b_sweep(void) {
     printf("  bf16_nld_b:   %d/%d\n", total - failed, total);
     return failed;
 }
+
+__attribute__((noinline)) static int bf16_nld_b_wrapper_verify(
+                                      const BF16_Type* A,
+                                      const BF16_Type* B_orig,
+                                      const BF16_Type* C_result,
+                                      int m, int k, int n) {
+    if (m <= 0 || k <= 0 || n <= 0)
+        return 0;
+    size_t count = (size_t)m * (size_t)n;
+    if (count > SIZE_MAX / sizeof(BF16_Accum))
+        return 0;
+    BF16_Accum* ref32 = (BF16_Accum*)calloc(count, sizeof(BF16_Accum));
+    if (!ref32)
+        return 0;
+    bf16_ref_gemm(A, B_orig, ref32, m, k, n);
+    int ok = 1;
+    for (int i = 0; i < m && ok; i++)
+        for (int j = 0; j < n && ok; j++) {
+            float got    = bf16_to_float(C_result[(size_t)i * n + j]);
+            float expect = ref32[(size_t)i * n + j];
+            float err = fabsf(got - expect);
+            if (err > BF16_EPSILON) {
+                printf("  BF16_NLD_B_WRAPPER MISMATCH at (%d,%d): got=%f expect=%f err=%e\n",
+                       i, j, (double)got, (double)expect, (double)err);
+                ok = 0;
+            }
+        }
+    free(ref32);
+    return ok;
+}
+
+static int bf16_nld_b_wrapper_test_single(int m, int k, int n, int num_threads) {
+    const size_t guard = 64;
+    const BF16_Type sentinel = 0x5a5a;
+    srand(42 + m * 131 + k * 17 + n * 7 + num_threads);
+    BF16_Type *A = (BF16_Type*)malloc((size_t)m * k * sizeof(BF16_Type));
+    BF16_Type *B = (BF16_Type*)malloc((size_t)k * n * sizeof(BF16_Type));
+    BF16_Type *C = (BF16_Type*)malloc(((size_t)m * n + guard) * sizeof(BF16_Type));
+    if (!A || !B || !C) {
+        free(A); free(B); free(C);
+        return 0;
+    }
+    for (int i = 0; i < m * k; i++)
+        A[i] = float_to_bf16(((float)rand() / (float)RAND_MAX) * 4.0f - 2.0f);
+    for (int i = 0; i < k * n; i++)
+        B[i] = float_to_bf16(((float)rand() / (float)RAND_MAX) * 4.0f - 2.0f);
+    for (size_t i = 0; i < (size_t)m * n + guard; i++)
+        C[i] = sentinel;
+
+    bf16gemm_mt_nld_b(A, B, C, m, k, n, num_threads);
+    int ok = bf16_nld_b_wrapper_verify(A, B, C, m, k, n);
+    for (size_t i = (size_t)m * n; i < (size_t)m * n + guard; i++) {
+        if (C[i] != sentinel) {
+            printf("  BF16_NLD_B_WRAPPER GUARD overwrite: M=%d K=%d N=%d threads=%d guard_off=%zu val=0x%x\n",
+                   m, k, n, num_threads, i - (size_t)m * n, C[i]);
+            ok = 0;
+            break;
+        }
+    }
+
+    free(A); free(B); free(C);
+    return ok;
+}
+
+static int bf16_nld_b_wrapper_sweep(void) {
+    int M_sizes[] = {1,2,4,7,8,9,12,15,16};
+    int K_sizes[] = {1,7,8,15,23,24,31,32};
+    int N_sizes[] = {1,7,8,9,15,16,23,24};
+    int Threads[] = {1,2,4};
+    int failed = 0, total = 0;
+    for (int mi = 0; mi < (int)(sizeof(M_sizes)/sizeof(M_sizes[0])); mi++)
+        for (int ki = 0; ki < (int)(sizeof(K_sizes)/sizeof(K_sizes[0])); ki++)
+            for (int ni = 0; ni < (int)(sizeof(N_sizes)/sizeof(N_sizes[0])); ni++)
+                for (int ti = 0; ti < (int)(sizeof(Threads)/sizeof(Threads[0])); ti++) {
+                    total++;
+                    int m = M_sizes[mi], k = K_sizes[ki], n = N_sizes[ni];
+                    int threads = Threads[ti];
+                    if (!bf16_nld_b_wrapper_test_single(m, k, n, threads)) {
+                        printf("BF16_NLD_B_WRAPPER FAIL: M=%d K=%d N=%d threads=%d\n",
+                               m, k, n, threads);
+                        failed++;
+                    }
+                }
+    printf("  bf16_nld_b_wrapper: %d/%d\n", total - failed, total);
+    return failed;
+}
+
+static int bf16_fp32_wrapper_verify(const BF16_Type* A, const BF16_Type* B,
+                                    const float* C_result,
+                                    int m, int k, int n,
+                                    const float *bias) {
+    size_t count = (size_t)m * (size_t)n;
+    BF16_Accum* ref = (BF16_Accum*)calloc(count, sizeof(BF16_Accum));
+    if (!ref)
+        return 0;
+    bf16_ref_gemm(A, B, ref, m, k, n);
+    int ok = 1;
+    for (int i = 0; i < m && ok; i++)
+        for (int j = 0; j < n && ok; j++) {
+            float expect = ref[(size_t)i * n + j] + (bias ? bias[j] : 0.0f);
+            float got = C_result[(size_t)i * n + j];
+            float err = fabsf(got - expect);
+            if (err > BF16_EPSILON) {
+                printf("  BF16_WRAPPER MISMATCH at (%d,%d): got=%f expect=%f err=%e\n",
+                       i, j, (double)got, (double)expect, (double)err);
+                ok = 0;
+            }
+        }
+    free(ref);
+    return ok;
+}
+
+static int bf16_fp32_wrapper_test_single(int m, int k, int n,
+                                         int num_threads, int with_bias) {
+    const size_t guard = 64;
+    const float sentinel = -12345.0f;
+    srand(314 + m * 131 + k * 17 + n * 7 + num_threads + with_bias);
+    BF16_Type *A = (BF16_Type*)malloc((size_t)m * k * sizeof(BF16_Type));
+    BF16_Type *B = (BF16_Type*)malloc((size_t)k * n * sizeof(BF16_Type));
+    float *C = (float*)malloc(((size_t)m * n + guard) * sizeof(float));
+    float *bias = with_bias ? (float*)malloc((size_t)n * sizeof(float)) : NULL;
+    if (!A || !B || !C || (with_bias && !bias)) {
+        free(A); free(B); free(C); free(bias);
+        return 0;
+    }
+    for (int i = 0; i < m * k; i++)
+        A[i] = float_to_bf16(((float)rand() / (float)RAND_MAX) * 4.0f - 2.0f);
+    for (int i = 0; i < k * n; i++)
+        B[i] = float_to_bf16(((float)rand() / (float)RAND_MAX) * 4.0f - 2.0f);
+    if (with_bias)
+        for (int i = 0; i < n; i++)
+            bias[i] = (float)((float)rand() / (float)RAND_MAX * 20.0f - 10.0f);
+    memset(C, 0, (size_t)m * n * sizeof(float));
+    for (size_t i = (size_t)m * n; i < (size_t)m * n + guard; i++)
+        C[i] = sentinel;
+
+    if (with_bias)
+        bf16gemm_mt_bias_f(A, B, C, m, k, n, num_threads, bias);
+    else
+        bf16gemm_mt(A, B, C, m, k, n, num_threads);
+
+    int ok = bf16_fp32_wrapper_verify(A, B, C, m, k, n, bias);
+    for (size_t i = (size_t)m * n; i < (size_t)m * n + guard; i++) {
+        if (C[i] != sentinel) {
+            printf("  BF16_WRAPPER GUARD overwrite: M=%d K=%d N=%d threads=%d bias=%d guard_off=%zu val=%f\n",
+                   m, k, n, num_threads, with_bias,
+                   i - (size_t)m * n, (double)C[i]);
+            ok = 0;
+            break;
+        }
+    }
+    free(A); free(B); free(C); free(bias);
+    return ok;
+}
+
+static int bf16_fp32_wrapper_sweep(void) {
+    int M_sizes[] = {1,2,4,7,8,9,15,16};
+    int K_sizes[] = {1,7,8,15,16,23,24,31,32};
+    int N_sizes[] = {1,7,8,9,15,16,23,24};
+    int Threads[] = {1,2,4};
+    int failed = 0, total = 0;
+    for (int bi = 0; bi < 2; bi++)
+        for (int mi = 0; mi < (int)(sizeof(M_sizes)/sizeof(M_sizes[0])); mi++)
+            for (int ki = 0; ki < (int)(sizeof(K_sizes)/sizeof(K_sizes[0])); ki++)
+                for (int ni = 0; ni < (int)(sizeof(N_sizes)/sizeof(N_sizes[0])); ni++)
+                    for (int ti = 0; ti < (int)(sizeof(Threads)/sizeof(Threads[0])); ti++) {
+                        total++;
+                        int m = M_sizes[mi], k = K_sizes[ki], n = N_sizes[ni];
+                        int threads = Threads[ti];
+                        if (!bf16_fp32_wrapper_test_single(m, k, n, threads, bi)) {
+                            printf("BF16_FP32_WRAPPER FAIL: M=%d K=%d N=%d threads=%d bias=%d\n",
+                                   m, k, n, threads, bi);
+                            failed++;
+                        }
+                    }
+    printf("  bf16_fp32_wrappers: %d/%d\n", total - failed, total);
+    return failed;
+}
 // I8 precision
 // ═══════════════════════════════════════════════════════════════════════
 typedef int32_t I8_Accum;
@@ -607,6 +794,15 @@ void i8gemm_k_ld2_f(const I8_Type *A, const I8_Type *B_reo,
 void i8gemm_k_ld4_f(const I8_Type *A, const I8_Type *B_reo,
                   float *C, I8_Type *A_reorder,
                   const gemm_params_t *params);
+void i8gemm_mt(const I8_Type *A_orig, const I8_Type *B_orig,
+               I8_Accum *C, int M, int K, int N,
+               int num_threads);
+void i8gemm_mt_f(const I8_Type *A_orig, const I8_Type *B_orig,
+                 float *C, int M, int K, int N,
+                 int num_threads);
+void i8gemm_mt_bias_f(const I8_Type *A_orig, const I8_Type *B_orig,
+                      float *C, int M, int K, int N,
+                      int num_threads, const float *bias);
 
 static void i8_reorder_B(const I8_Type* B, I8_Type* B_reo, int K, int N) {
     assert(K % 8 == 0 && N % 8 == 0);
@@ -981,6 +1177,161 @@ static int i8_bias_f_sweep(void) {
     return failed;
 }
 
+static int i8_i32_wrapper_verify(const I8_Type* A, const I8_Type* B,
+                                 const I8_Accum* C_result,
+                                 int m, int k, int n) {
+    size_t count = (size_t)m * (size_t)n;
+    I8_Accum* ref = (I8_Accum*)calloc(count, sizeof(I8_Accum));
+    if (!ref)
+        return 0;
+    i8_ref_gemm(A, B, ref, m, k, n);
+    int ok = 1;
+    for (int i = 0; i < m && ok; i++)
+        for (int j = 0; j < n && ok; j++) {
+            I8_Accum got = C_result[(size_t)i * n + j];
+            I8_Accum expect = ref[(size_t)i * n + j];
+            if (got != expect) {
+                printf("  I8_WRAPPER MISMATCH at (%d,%d): got=%d expect=%d\n",
+                       i, j, got, expect);
+                ok = 0;
+            }
+        }
+    free(ref);
+    return ok;
+}
+
+static int i8_f32_wrapper_verify(const I8_Type* A, const I8_Type* B,
+                                 const float* C_result,
+                                 int m, int k, int n,
+                                 const float *bias) {
+    size_t count = (size_t)m * (size_t)n;
+    I8_Accum* ref_i32 = (I8_Accum*)calloc(count, sizeof(I8_Accum));
+    if (!ref_i32)
+        return 0;
+    i8_ref_gemm(A, B, ref_i32, m, k, n);
+    int ok = 1;
+    for (int i = 0; i < m && ok; i++)
+        for (int j = 0; j < n && ok; j++) {
+            float got = C_result[(size_t)i * n + j];
+            float expect = (float)ref_i32[(size_t)i * n + j] +
+                           (bias ? bias[j] : 0.0f);
+            if (got != expect) {
+                printf("  I8_F32_WRAPPER MISMATCH at (%d,%d): got=%f expect=%f\n",
+                       i, j, (double)got, (double)expect);
+                ok = 0;
+            }
+        }
+    free(ref_i32);
+    return ok;
+}
+
+static int i8_i32_wrapper_test_single(int m, int k, int n, int num_threads) {
+    const size_t guard = 64;
+    const I8_Accum sentinel = (I8_Accum)0x5a5a5a5a;
+    srand(271 + m * 131 + k * 17 + n * 7 + num_threads);
+    I8_Type *A = (I8_Type*)malloc((size_t)m * k);
+    I8_Type *B = (I8_Type*)malloc((size_t)k * n);
+    I8_Accum *C = (I8_Accum*)malloc(((size_t)m * n + guard) * sizeof(I8_Accum));
+    if (!A || !B || !C) {
+        free(A); free(B); free(C);
+        return 0;
+    }
+    for (int i = 0; i < m * k; i++)
+        A[i] = (I8_Type)(rand() % 256 - 128);
+    for (int i = 0; i < k * n; i++)
+        B[i] = (I8_Type)(rand() % 256 - 128);
+    memset(C, 0, (size_t)m * n * sizeof(I8_Accum));
+    for (size_t i = (size_t)m * n; i < (size_t)m * n + guard; i++)
+        C[i] = sentinel;
+
+    i8gemm_mt(A, B, C, m, k, n, num_threads);
+    int ok = i8_i32_wrapper_verify(A, B, C, m, k, n);
+    for (size_t i = (size_t)m * n; i < (size_t)m * n + guard; i++) {
+        if (C[i] != sentinel) {
+            printf("  I8_WRAPPER GUARD overwrite: M=%d K=%d N=%d threads=%d guard_off=%zu val=%d\n",
+                   m, k, n, num_threads, i - (size_t)m * n, C[i]);
+            ok = 0;
+            break;
+        }
+    }
+    free(A); free(B); free(C);
+    return ok;
+}
+
+static int i8_f32_wrapper_test_single(int m, int k, int n,
+                                      int num_threads, int with_bias) {
+    const size_t guard = 64;
+    const float sentinel = -23456.0f;
+    srand(977 + m * 131 + k * 17 + n * 7 + num_threads + with_bias);
+    I8_Type *A = (I8_Type*)malloc((size_t)m * k);
+    I8_Type *B = (I8_Type*)malloc((size_t)k * n);
+    float *C = (float*)malloc(((size_t)m * n + guard) * sizeof(float));
+    float *bias = with_bias ? (float*)malloc((size_t)n * sizeof(float)) : NULL;
+    if (!A || !B || !C || (with_bias && !bias)) {
+        free(A); free(B); free(C); free(bias);
+        return 0;
+    }
+    for (int i = 0; i < m * k; i++)
+        A[i] = (I8_Type)(rand() % 256 - 128);
+    for (int i = 0; i < k * n; i++)
+        B[i] = (I8_Type)(rand() % 256 - 128);
+    if (with_bias)
+        for (int i = 0; i < n; i++)
+            bias[i] = (float)((float)rand() / (float)RAND_MAX * 20.0f - 10.0f);
+    memset(C, 0, (size_t)m * n * sizeof(float));
+    for (size_t i = (size_t)m * n; i < (size_t)m * n + guard; i++)
+        C[i] = sentinel;
+
+    if (with_bias)
+        i8gemm_mt_bias_f(A, B, C, m, k, n, num_threads, bias);
+    else
+        i8gemm_mt_f(A, B, C, m, k, n, num_threads);
+
+    int ok = i8_f32_wrapper_verify(A, B, C, m, k, n, bias);
+    for (size_t i = (size_t)m * n; i < (size_t)m * n + guard; i++) {
+        if (C[i] != sentinel) {
+            printf("  I8_F32_WRAPPER GUARD overwrite: M=%d K=%d N=%d threads=%d bias=%d guard_off=%zu val=%f\n",
+                   m, k, n, num_threads, with_bias,
+                   i - (size_t)m * n, (double)C[i]);
+            ok = 0;
+            break;
+        }
+    }
+    free(A); free(B); free(C); free(bias);
+    return ok;
+}
+
+static int i8_wrapper_sweep(void) {
+    int M_sizes[] = {1,2,4,7,8,9,15,16};
+    int K_sizes[] = {1,7,8,15,16,23,24,31,32};
+    int N_sizes[] = {1,7,8,9,15,16,23,24};
+    int Threads[] = {1,2,4};
+    int failed = 0, total = 0;
+    for (int mi = 0; mi < (int)(sizeof(M_sizes)/sizeof(M_sizes[0])); mi++)
+        for (int ki = 0; ki < (int)(sizeof(K_sizes)/sizeof(K_sizes[0])); ki++)
+            for (int ni = 0; ni < (int)(sizeof(N_sizes)/sizeof(N_sizes[0])); ni++)
+                for (int ti = 0; ti < (int)(sizeof(Threads)/sizeof(Threads[0])); ti++) {
+                    int m = M_sizes[mi], k = K_sizes[ki], n = N_sizes[ni];
+                    int threads = Threads[ti];
+                    total++;
+                    if (!i8_i32_wrapper_test_single(m, k, n, threads)) {
+                        printf("I8_I32_WRAPPER FAIL: M=%d K=%d N=%d threads=%d\n",
+                               m, k, n, threads);
+                        failed++;
+                    }
+                    for (int bi = 0; bi < 2; bi++) {
+                        total++;
+                        if (!i8_f32_wrapper_test_single(m, k, n, threads, bi)) {
+                            printf("I8_F32_WRAPPER FAIL: M=%d K=%d N=%d threads=%d bias=%d\n",
+                                   m, k, n, threads, bi);
+                            failed++;
+                        }
+                    }
+                }
+    printf("  i8_wrappers:  %d/%d\n", total - failed, total);
+    return failed;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════
@@ -989,9 +1340,10 @@ int main(int argc, char *argv[]) {
 
     if (strcmp(mode, "all") != 0 && strcmp(mode, "bf16") != 0 &&
         strcmp(mode, "bf16bias") != 0 && strcmp(mode, "bf16nld") != 0 &&
+        strcmp(mode, "bf16wrap") != 0 &&
         strcmp(mode, "i8")   != 0 && strcmp(mode, "i8f")  != 0 &&
-        strcmp(mode, "i8bias") != 0) {
-        fprintf(stderr, "Usage: %s [bf16|bf16bias|bf16nld|i8|i8f|i8bias|all]\n", argv[0]);
+        strcmp(mode, "i8bias") != 0 && strcmp(mode, "i8wrap") != 0) {
+        fprintf(stderr, "Usage: %s [bf16|bf16bias|bf16nld|bf16wrap|i8|i8f|i8bias|i8wrap|all]\n", argv[0]);
         return 1;
     }
 
@@ -1009,6 +1361,9 @@ int main(int argc, char *argv[]) {
     if (strcmp(mode, "all") == 0 || strcmp(mode, "i8bias") == 0) {
         total_failed += i8_bias_f_sweep();
     }
+    if (strcmp(mode, "all") == 0 || strcmp(mode, "i8wrap") == 0) {
+        total_failed += i8_wrapper_sweep();
+    }
     if (strcmp(mode, "all") == 0 || strcmp(mode, "bf16") == 0) {
         printf("  starting bf16_sweep...\n"); fflush(stdout);
         total_failed += bf16_sweep();
@@ -1019,6 +1374,10 @@ int main(int argc, char *argv[]) {
     }
     if (strcmp(mode, "all") == 0 || strcmp(mode, "bf16nld") == 0) {
         total_failed += bf16_nld_b_sweep();
+        total_failed += bf16_nld_b_wrapper_sweep();
+    }
+    if (strcmp(mode, "all") == 0 || strcmp(mode, "bf16wrap") == 0) {
+        total_failed += bf16_fp32_wrapper_sweep();
     }
 
     printf("=== correctness test end ===\n");

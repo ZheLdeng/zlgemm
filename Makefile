@@ -16,7 +16,7 @@
 #   check          — same as test (correctness + log)
 #   clean          — remove binaries, objects, logs
 #
-# Sweep sequence: {1,2,4,8,10,16,20,32,40,64}, skipping nthreads >= ncores.
+# Sweep sequence: {1,2,4,8,10,16,20,32,40,64,80}, skipping nthreads > ncores.
 # Core affinity: taskset + OMP_PLACES=cores OMP_PROC_BIND=close.
 #
 # Source groups:
@@ -60,7 +60,7 @@ bench: bench_perf
 	taskset -c $(or $(c),0) ./bench_perf $(CSV) 2>&1 | tee bench_perf.log
 
 # ── Multi-threaded sweep targets ──
-# Sweep all shapes from shape.csv, each with all thread counts < ncores.
+# Sweep all shapes from shape.csv, each with all thread counts <= ncores.
 # Override CSV with e.g.  make bench CSV=my_shapes.csv  or  make mt CSV=my_shapes.csv
 CSV ?= shape.csv
 
@@ -73,8 +73,8 @@ mt-bf16: bench_perf
 mt-i8: bench_perf
 	taskset -c $(or $(c),0-$(LAST)) ./bench_perf --mt-sweep-csv-i8 $(CSV) 2>&1 | tee mt_sweep.log
 
-test_correctness: test_correctness.c $(COMMON_HEADERS) $(ALL_ASM)
-	$(CC) -o $@ $(filter %.c %.S,$^) $(CFLAGS) $(LDFLAGS) $(LDLIBS)
+test_correctness: test_correctness.c $(MT_SRC) $(COMMON_HEADERS) $(ALL_ASM)
+	$(CC) -o $@ $(filter %.c %.S,$^) $(CFLAGS) $(OMP_FLAGS) $(LDFLAGS) $(LDLIBS)
 
 # bench_perf links bf16gemm_mt.c for multi-threaded mode
 bench_perf: bench_perf.c $(MT_SRC) $(COMMON_HEADERS) i8gemm.h bf16gemm.h $(ALL_ASM)

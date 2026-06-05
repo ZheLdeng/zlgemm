@@ -29,6 +29,16 @@ typedef int8_t  i8_t;
 typedef int32_t i32_t;
 typedef float    f32_t;
 
+static size_t round_up_64(size_t size) {
+    return (size + 63u) & ~(size_t)63u;
+}
+
+static void *aligned_alloc_64(size_t size) {
+    if (size == 0)
+        size = 64;
+    return aligned_alloc(64, round_up_64(size));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Kernel declarations (from i8gemm_k.S)
 // ═══════════════════════════════════════════════════════════════════════
@@ -183,8 +193,8 @@ static void tile_N_i8(const i8_t *A, const i8_t *B_reo,
             int my_n       = my_blocks * 8;
             int my_n_start = start_block * 8;
 
-            i8_t *my_A_reo = (i8_t *)aligned_alloc(64,
-                (size_t)M * K_r * sizeof(i8_t) * 2);
+            i8_t *my_A_reo = (i8_t *)aligned_alloc_64(
+                (size_t)(M + 8) * K_r * sizeof(i8_t));
             if (my_A_reo) {
                 // B: each N-block = K_r * 8 int8 values (= K_r * 8 bytes)
                 const i8_t *my_B = B_reo + (uint64_t)start_block * K_r * 8;
@@ -222,8 +232,8 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
         // M-tiling: one shared A_reorder pool, partitioned by M rows.
         // ld1 tail kernel writes zero-padded q-regs (2× expansion per row);
         // use 2× allocation to avoid overflow for non-multiple-of-8 M.
-        i8_t *A_reo_pool = (i8_t *)aligned_alloc(64,
-            (size_t)M * K_r * sizeof(i8_t) * 2);
+        i8_t *A_reo_pool = (i8_t *)aligned_alloc_64(
+            (size_t)(M + 8) * K_r * sizeof(i8_t));
         if (!A_reo_pool) return;
         tile_M_i8(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads);
         free(A_reo_pool);
@@ -250,7 +260,7 @@ void i8gemm_mt(const i8_t *A_orig, const i8_t *B_orig,
     int N_r = ((N + 7)  / 8)  * 8;   if (N_r < 8)   N_r = 8;
 
     // Pack B
-    i8_t *B_reo = (i8_t *)aligned_alloc(64,
+    i8_t *B_reo = (i8_t *)aligned_alloc_64(
         (size_t)K_r * N_r * sizeof(i8_t));
     if (!B_reo) return;
 
@@ -268,11 +278,6 @@ void i8gemm_mt(const i8_t *A_orig, const i8_t *B_orig,
     i8_pack_B(B_use, B_reo, K_r, N_r);
     free(B_pad);
 
-    // Zero C padding columns
-    if (N_r != N)
-        for (int i = 0; i < M; i++)
-            memset(C + i * N_r + N, 0, (N_r - N) * sizeof(i32_t));
-
     // Pad A if needed
     i8_t *A_pad = NULL;
     const i8_t *A_use;
@@ -286,7 +291,17 @@ void i8gemm_mt(const i8_t *A_orig, const i8_t *B_orig,
         A_use = A_pad;
     }
 
-    i8gemm_mt_dispatch(A_use, B_reo, C, M, K_r, N_r, num_threads);
+    if (N_r == N) {
+        i8gemm_mt_dispatch(A_use, B_reo, C, M, K_r, N_r, num_threads);
+    } else {
+        i32_t *C_pad = (i32_t *)calloc((size_t)M * N_r, sizeof(i32_t));
+        if (!C_pad) { free(A_pad); free(B_reo); return; }
+        i8gemm_mt_dispatch(A_use, B_reo, C_pad, M, K_r, N_r, num_threads);
+        for (int i = 0; i < M; i++)
+            memcpy(C + (size_t)i * N, C_pad + (size_t)i * N_r,
+                   (size_t)N * sizeof(i32_t));
+        free(C_pad);
+    }
 
     free(A_pad);
     free(B_reo);
@@ -419,8 +434,8 @@ static void tile_N_i8_f(const i8_t *A, const i8_t *B_reo,
             int my_n       = my_blocks * 8;
             int my_n_start = start_block * 8;
 
-            i8_t *my_A_reo = (i8_t *)aligned_alloc(64,
-                (size_t)M * K_r * sizeof(i8_t) * 2);
+            i8_t *my_A_reo = (i8_t *)aligned_alloc_64(
+                (size_t)(M + 8) * K_r * sizeof(i8_t));
             if (my_A_reo) {
                 const i8_t *my_B = B_reo + (uint64_t)start_block * K_r * 8;
                 f32_t *my_C = C + my_n_start;
@@ -443,8 +458,8 @@ void i8gemm_mt_dispatch_f(const i8_t *A, const i8_t *B_reo,
     int M_blocks = M / 8;
 
     if (M_blocks >= num_threads) {
-        i8_t *A_reo_pool = (i8_t *)aligned_alloc(64,
-            (size_t)M * K_r * sizeof(i8_t));
+        i8_t *A_reo_pool = (i8_t *)aligned_alloc_64(
+            (size_t)(M + 8) * K_r * sizeof(i8_t));
         if (!A_reo_pool) return;
         tile_M_i8_f(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads);
         free(A_reo_pool);
@@ -461,7 +476,7 @@ void i8gemm_mt_f(const i8_t *A_orig, const i8_t *B_orig,
     int N_r = ((N + 7)  / 8)  * 8;   if (N_r < 8)   N_r = 8;
 
     // Pack B (same as i32 path)
-    i8_t *B_reo = (i8_t *)aligned_alloc(64,
+    i8_t *B_reo = (i8_t *)aligned_alloc_64(
         (size_t)K_r * N_r * sizeof(i8_t));
     if (!B_reo) return;
 
@@ -479,11 +494,6 @@ void i8gemm_mt_f(const i8_t *A_orig, const i8_t *B_orig,
     i8_pack_B(B_use, B_reo, K_r, N_r);
     free(B_pad);
 
-    // Zero C padding columns (f32)
-    if (N_r != N)
-        for (int i = 0; i < M; i++)
-            memset(C + i * N_r + N, 0, (N_r - N) * sizeof(f32_t));
-
     // Pad A if needed
     i8_t *A_pad = NULL;
     const i8_t *A_use;
@@ -497,7 +507,17 @@ void i8gemm_mt_f(const i8_t *A_orig, const i8_t *B_orig,
         A_use = A_pad;
     }
 
-    i8gemm_mt_dispatch_f(A_use, B_reo, C, M, K_r, N_r, num_threads);
+    if (N_r == N) {
+        i8gemm_mt_dispatch_f(A_use, B_reo, C, M, K_r, N_r, num_threads);
+    } else {
+        f32_t *C_pad = (f32_t *)calloc((size_t)M * N_r, sizeof(f32_t));
+        if (!C_pad) { free(A_pad); free(B_reo); return; }
+        i8gemm_mt_dispatch_f(A_use, B_reo, C_pad, M, K_r, N_r, num_threads);
+        for (int i = 0; i < M; i++)
+            memcpy(C + (size_t)i * N, C_pad + (size_t)i * N_r,
+                   (size_t)N * sizeof(f32_t));
+        free(C_pad);
+    }
 
     free(A_pad);
     free(B_reo);
@@ -640,8 +660,8 @@ static void tile_N_i8_bias_f(const i8_t *A, const i8_t *B_reo,
             int my_n       = my_blocks * 8;
             int my_n_start = start_block * 8;
 
-            i8_t *my_A_reo = (i8_t *)aligned_alloc(64,
-                (size_t)M * K_r * sizeof(i8_t) * 2);
+            i8_t *my_A_reo = (i8_t *)aligned_alloc_64(
+                (size_t)(M + 8) * K_r * sizeof(i8_t));
             if (my_A_reo) {
                 const i8_t   *my_B   = B_reo + (uint64_t)start_block * K_r * 8;
                 f32_t        *my_C   = C + my_n_start;
@@ -665,8 +685,8 @@ void i8gemm_mt_dispatch_bias_f(const i8_t *A, const i8_t *B_reo,
     int M_blocks = M / 8;
 
     if (M_blocks >= num_threads) {
-        i8_t *A_reo_pool = (i8_t *)aligned_alloc(64,
-            (size_t)M * K_r * sizeof(i8_t));
+        i8_t *A_reo_pool = (i8_t *)aligned_alloc_64(
+            (size_t)(M + 8) * K_r * sizeof(i8_t));
         if (!A_reo_pool) return;
         tile_M_i8_bias_f(A, B_reo, C, M, K_r, N_r, A_reo_pool,
                           num_threads, bias);
@@ -684,7 +704,7 @@ void i8gemm_mt_bias_f(const i8_t *A_orig, const i8_t *B_orig,
     int N_r = ((N + 7)  / 8)  * 8;   if (N_r < 8)   N_r = 8;
 
     // Pack B (same as other i8 variants)
-    i8_t *B_reo = (i8_t *)aligned_alloc(64,
+    i8_t *B_reo = (i8_t *)aligned_alloc_64(
         (size_t)K_r * N_r * sizeof(i8_t));
     if (!B_reo) return;
 
@@ -727,8 +747,19 @@ void i8gemm_mt_bias_f(const i8_t *A_orig, const i8_t *B_orig,
         A_use = A_pad;
     }
 
-    i8gemm_mt_dispatch_bias_f(A_use, B_reo, C, M, K_r, N_r,
-                               num_threads, bias_use);
+    if (N_r == N) {
+        i8gemm_mt_dispatch_bias_f(A_use, B_reo, C, M, K_r, N_r,
+                                  num_threads, bias_use);
+    } else {
+        f32_t *C_pad = (f32_t *)calloc((size_t)M * N_r, sizeof(f32_t));
+        if (!C_pad) { free(A_pad); free(bias_pad); free(B_reo); return; }
+        i8gemm_mt_dispatch_bias_f(A_use, B_reo, C_pad, M, K_r, N_r,
+                                  num_threads, bias_use);
+        for (int i = 0; i < M; i++)
+            memcpy(C + (size_t)i * N, C_pad + (size_t)i * N_r,
+                   (size_t)N * sizeof(f32_t));
+        free(C_pad);
+    }
 
     free(A_pad);
     free(bias_pad);

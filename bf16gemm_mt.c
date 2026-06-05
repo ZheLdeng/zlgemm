@@ -28,6 +28,16 @@
 typedef uint16_t bf16_t;
 typedef float    f32_t;
 
+static size_t round_up_64(size_t size) {
+    return (size + 63u) & ~(size_t)63u;
+}
+
+static void *aligned_alloc_64(size_t size) {
+    if (size == 0)
+        size = 64;
+    return aligned_alloc(64, round_up_64(size));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Kernel declarations (from bf16gemm_k.S)
 // ═══════════════════════════════════════════════════════════════════════
@@ -191,8 +201,8 @@ static void tile_N(const bf16_t *A, const bf16_t *B_reo,
             int my_n       = my_blocks * 8;
             int my_n_start = start_block * 8;
 
-            bf16_t *my_A_reo = (bf16_t *)aligned_alloc(64,
-                (size_t)M * K_r * sizeof(bf16_t) * 2);
+            bf16_t *my_A_reo = (bf16_t *)aligned_alloc_64(
+                (size_t)(M + 8) * K_r * sizeof(bf16_t));
             if (my_A_reo) {
                 // B: each N-block = K_r * 8 bf16 values
                 const bf16_t *my_B = B_reo + (uint64_t)start_block * K_r * 8;
@@ -227,10 +237,8 @@ void bf16gemm_mt_dispatch(const bf16_t *A, const bf16_t *B_reo,
 
     if (M_blocks >= num_threads) {
         // M-tiling: one shared A_reorder pool, partitioned by M rows.
-        // ld1 tail kernel writes zero-padded q-regs (2× expansion per row);
-        // use 2× allocation to avoid overflow for non-multiple-of-8 M.
-        bf16_t *A_reo_pool = (bf16_t *)aligned_alloc(64,
-            (size_t)M * K_r * sizeof(bf16_t) * 2);
+        bf16_t *A_reo_pool = (bf16_t *)aligned_alloc_64(
+            (size_t)(M + 8) * K_r * sizeof(bf16_t));
         if (!A_reo_pool) return;
         tile_M(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads);
         free(A_reo_pool);
@@ -257,7 +265,7 @@ void bf16gemm_mt(const bf16_t *A_orig, const bf16_t *B_orig,
     int N_r = ((N + 7) / 8) * 8;   if (N_r < 8)  N_r = 8;
 
     // Pack B
-    bf16_t *B_reo = (bf16_t *)aligned_alloc(64,
+    bf16_t *B_reo = (bf16_t *)aligned_alloc_64(
         (size_t)K_r * N_r * sizeof(bf16_t));
     if (!B_reo) return;
 
@@ -275,11 +283,6 @@ void bf16gemm_mt(const bf16_t *A_orig, const bf16_t *B_orig,
     bf16_pack_B(B_use, B_reo, K_r, N_r);
     free(B_pad);
 
-    // Zero C padding columns
-    if (N_r != N)
-        for (int i = 0; i < M; i++)
-            memset(C + i * N_r + N, 0, (N_r - N) * sizeof(f32_t));
-
     // Pad A if needed
     bf16_t *A_pad = NULL;
     const bf16_t *A_use;
@@ -293,7 +296,17 @@ void bf16gemm_mt(const bf16_t *A_orig, const bf16_t *B_orig,
         A_use = A_pad;
     }
 
-    bf16gemm_mt_dispatch(A_use, B_reo, C, M, K_r, N_r, num_threads);
+    if (N_r == N) {
+        bf16gemm_mt_dispatch(A_use, B_reo, C, M, K_r, N_r, num_threads);
+    } else {
+        f32_t *C_pad = (f32_t *)calloc((size_t)M * N_r, sizeof(f32_t));
+        if (!C_pad) { free(A_pad); free(B_reo); return; }
+        bf16gemm_mt_dispatch(A_use, B_reo, C_pad, M, K_r, N_r, num_threads);
+        for (int i = 0; i < M; i++)
+            memcpy(C + (size_t)i * N, C_pad + (size_t)i * N_r,
+                   (size_t)N * sizeof(f32_t));
+        free(C_pad);
+    }
 
     free(A_pad);
     free(B_reo);
@@ -422,8 +435,8 @@ static void tile_N_bf16_nld_b(const bf16_t *A, const bf16_t *B_reo,
         if (my_blocks > 0) {
             int my_n       = my_blocks * 8;
             int my_n_start = start_block * 8;
-            bf16_t *my_A_reo = (bf16_t *)aligned_alloc(64,
-                (size_t)M * K_r * sizeof(bf16_t) * 2);
+            bf16_t *my_A_reo = (bf16_t *)aligned_alloc_64(
+                (size_t)(M + 8) * K_r * sizeof(bf16_t));
             if (my_A_reo) {
                 const bf16_t *my_B = B_reo + (uint64_t)start_block * K_r * 8;
                 bf16_t       *my_C = C + my_n_start;
@@ -443,8 +456,8 @@ void bf16gemm_mt_dispatch_nld_b(const bf16_t *A, const bf16_t *B_reo,
     if (num_threads <= 0) num_threads = 1;
     int M_blocks = M / 8;
     if (M_blocks >= num_threads) {
-        bf16_t *A_reo_pool = (bf16_t *)aligned_alloc(64,
-            (size_t)M * K_r * sizeof(bf16_t));
+        bf16_t *A_reo_pool = (bf16_t *)aligned_alloc_64(
+            (size_t)(M + 8) * K_r * sizeof(bf16_t));
         if (!A_reo_pool) return;
         tile_M_bf16_nld_b(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads);
         free(A_reo_pool);
@@ -460,7 +473,7 @@ void bf16gemm_mt_nld_b(const bf16_t *A_orig, const bf16_t *B_orig,
     int K_r = ((K + 7) / 8) * 8;   if (K_r < 8)  K_r = 8;
     int N_r = ((N + 7) / 8) * 8;   if (N_r < 8)  N_r = 8;
 
-    bf16_t *B_reo = (bf16_t *)aligned_alloc(64,
+    bf16_t *B_reo = (bf16_t *)aligned_alloc_64(
         (size_t)K_r * N_r * sizeof(bf16_t));
     if (!B_reo) return;
 
@@ -490,7 +503,18 @@ void bf16gemm_mt_nld_b(const bf16_t *A_orig, const bf16_t *B_orig,
         A_use = A_pad;
     }
 
-    bf16gemm_mt_dispatch_nld_b(A_use, B_reo, C, M, K_r, N_r, num_threads);
+    if (N_r == N) {
+        bf16gemm_mt_dispatch_nld_b(A_use, B_reo, C, M, K_r, N_r, num_threads);
+    } else {
+        bf16_t *C_pad = (bf16_t *)calloc((size_t)M * N_r, sizeof(bf16_t));
+        if (!C_pad) { free(A_pad); free(B_reo); return; }
+        bf16gemm_mt_dispatch_nld_b(A_use, B_reo, C_pad, M, K_r, N_r,
+                                   num_threads);
+        for (int i = 0; i < M; i++)
+            memcpy(C + (size_t)i * N, C_pad + (size_t)i * N_r,
+                   (size_t)N * sizeof(bf16_t));
+        free(C_pad);
+    }
 
     free(A_pad);
     free(B_reo);
@@ -633,8 +657,8 @@ static void tile_N_bf16_bias_f(const bf16_t *A, const bf16_t *B_reo,
             int my_n       = my_blocks * 8;
             int my_n_start = start_block * 8;
 
-            bf16_t *my_A_reo = (bf16_t *)aligned_alloc(64,
-                (size_t)M * K_r * sizeof(bf16_t) * 2);
+            bf16_t *my_A_reo = (bf16_t *)aligned_alloc_64(
+                (size_t)(M + 8) * K_r * sizeof(bf16_t));
             if (my_A_reo) {
                 const bf16_t *my_B    = B_reo + (uint64_t)start_block * K_r * 8;
                 f32_t        *my_C    = C + my_n_start;
@@ -658,8 +682,8 @@ void bf16gemm_mt_dispatch_bias_f(const bf16_t *A, const bf16_t *B_reo,
     int M_blocks = M / 8;
 
     if (M_blocks >= num_threads) {
-        bf16_t *A_reo_pool = (bf16_t *)aligned_alloc(64,
-            (size_t)M * K_r * sizeof(bf16_t));
+        bf16_t *A_reo_pool = (bf16_t *)aligned_alloc_64(
+            (size_t)(M + 8) * K_r * sizeof(bf16_t));
         if (!A_reo_pool) return;
         tile_M_bf16_bias_f(A, B_reo, C, M, K_r, N_r, A_reo_pool,
                             num_threads, bias);
@@ -677,7 +701,7 @@ void bf16gemm_mt_bias_f(const bf16_t *A_orig, const bf16_t *B_orig,
     int N_r = ((N + 7) / 8) * 8;   if (N_r < 8)  N_r = 8;
 
     // Pack B
-    bf16_t *B_reo = (bf16_t *)aligned_alloc(64,
+    bf16_t *B_reo = (bf16_t *)aligned_alloc_64(
         (size_t)K_r * N_r * sizeof(bf16_t));
     if (!B_reo) return;
 
@@ -720,8 +744,19 @@ void bf16gemm_mt_bias_f(const bf16_t *A_orig, const bf16_t *B_orig,
         A_use = A_pad;
     }
 
-    bf16gemm_mt_dispatch_bias_f(A_use, B_reo, C, M, K_r, N_r,
-                                 num_threads, bias_use);
+    if (N_r == N) {
+        bf16gemm_mt_dispatch_bias_f(A_use, B_reo, C, M, K_r, N_r,
+                                    num_threads, bias_use);
+    } else {
+        f32_t *C_pad = (f32_t *)calloc((size_t)M * N_r, sizeof(f32_t));
+        if (!C_pad) { free(A_pad); free(bias_pad); free(B_reo); return; }
+        bf16gemm_mt_dispatch_bias_f(A_use, B_reo, C_pad, M, K_r, N_r,
+                                    num_threads, bias_use);
+        for (int i = 0; i < M; i++)
+            memcpy(C + (size_t)i * N, C_pad + (size_t)i * N_r,
+                   (size_t)N * sizeof(f32_t));
+        free(C_pad);
+    }
 
     free(A_pad);
     free(bias_pad);

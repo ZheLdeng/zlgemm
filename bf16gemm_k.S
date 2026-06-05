@@ -105,6 +105,18 @@
 	ldp x19, x20, [sp], #16
 	.endm
 
+// ── Common data-layout helpers ────────────────────────────────────
+	.macro LOAD_BF16_ROW_F32 addr, vlo, vhi
+	ldr  q0, [\addr]
+	shll  \vlo\().4s, v0.4h, #16
+	shll2 \vhi\().4s, v0.8h, #16
+	.endm
+
+	.macro ZIP12_D dst1, dst2, src1, src2
+	zip1 \dst1\().2d, \src1\().2d, \src2\().2d
+	zip2 \dst2\().2d, \src1\().2d, \src2\().2d
+	.endm
+
 // ── LOAD_C_ROWMAJOR_B：从 bf16 C 加载 8×8 → blocked v9~v24 ──
 	.macro LOAD_C_ROWMAJOR_B
 	add  x11, C_M_BASE, LDC_B
@@ -114,22 +126,22 @@
 	add  x15, x11, LDC_B, lsl #2
 	add  x16, x12, LDC_B, lsl #2
 	add  x17, x15, LDC_B, lsl #1
-	ldr  q0, [C_M_BASE]; shll  v2.4s, v0.4h, #16; shll2 v3.4s, v0.8h, #16
-	ldr  q0, [x11];       shll  v4.4s, v0.4h, #16; shll2 v5.4s, v0.8h, #16
-	zip1 v9.2d,  v2.2d, v4.2d; zip2 v10.2d, v2.2d, v4.2d
-	zip1 v11.2d, v3.2d, v5.2d; zip2 v12.2d, v3.2d, v5.2d
-	ldr  q0, [x12];       shll  v2.4s, v0.4h, #16; shll2 v3.4s, v0.8h, #16
-	ldr  q0, [x13];       shll  v4.4s, v0.4h, #16; shll2 v5.4s, v0.8h, #16
-	zip1 v13.2d, v2.2d, v4.2d; zip2 v14.2d, v2.2d, v4.2d
-	zip1 v15.2d, v3.2d, v5.2d; zip2 v16.2d, v3.2d, v5.2d
-	ldr  q0, [x14];       shll  v2.4s, v0.4h, #16; shll2 v3.4s, v0.8h, #16
-	ldr  q0, [x15];       shll  v4.4s, v0.4h, #16; shll2 v5.4s, v0.8h, #16
-	zip1 v17.2d, v2.2d, v4.2d; zip2 v18.2d, v2.2d, v4.2d
-	zip1 v19.2d, v3.2d, v5.2d; zip2 v20.2d, v3.2d, v5.2d
-	ldr  q0, [x16];       shll  v2.4s, v0.4h, #16; shll2 v3.4s, v0.8h, #16
-	ldr  q0, [x17];       shll  v4.4s, v0.4h, #16; shll2 v5.4s, v0.8h, #16
-	zip1 v21.2d, v2.2d, v4.2d; zip2 v22.2d, v2.2d, v4.2d
-	zip1 v23.2d, v3.2d, v5.2d; zip2 v24.2d, v3.2d, v5.2d
+	LOAD_BF16_ROW_F32 C_M_BASE, v2, v3
+	LOAD_BF16_ROW_F32 x11, v4, v5
+	ZIP12_D v9,  v10, v2, v4
+	ZIP12_D v11, v12, v3, v5
+	LOAD_BF16_ROW_F32 x12, v2, v3
+	LOAD_BF16_ROW_F32 x13, v4, v5
+	ZIP12_D v13, v14, v2, v4
+	ZIP12_D v15, v16, v3, v5
+	LOAD_BF16_ROW_F32 x14, v2, v3
+	LOAD_BF16_ROW_F32 x15, v4, v5
+	ZIP12_D v17, v18, v2, v4
+	ZIP12_D v19, v20, v3, v5
+	LOAD_BF16_ROW_F32 x16, v2, v3
+	LOAD_BF16_ROW_F32 x17, v4, v5
+	ZIP12_D v21, v22, v2, v4
+	ZIP12_D v23, v24, v3, v5
 	.endm
 
 // ── LOAD_C_ROWMAJOR：从行主序 C 加载 8×8 float32 → blocked v9~v24 ──
@@ -154,25 +166,17 @@
 	ldp  q30, q31, [x17]
 
 	// zip pairs to form 2×2 blocked layout
-	zip1 v9.2d,  v0.2d, v2.2d
-	zip2 v10.2d, v0.2d, v2.2d
-	zip1 v11.2d, v1.2d, v3.2d
-	zip2 v12.2d, v1.2d, v3.2d
+	ZIP12_D v9,  v10, v0, v2
+	ZIP12_D v11, v12, v1, v3
 
-	zip1 v13.2d, v4.2d, v6.2d
-	zip2 v14.2d, v4.2d, v6.2d
-	zip1 v15.2d, v5.2d, v7.2d
-	zip2 v16.2d, v5.2d, v7.2d
+	ZIP12_D v13, v14, v4, v6
+	ZIP12_D v15, v16, v5, v7
 
-	zip1 v17.2d, v8.2d, v26.2d
-	zip2 v18.2d, v8.2d, v26.2d
-	zip1 v19.2d, v25.2d, v27.2d
-	zip2 v20.2d, v25.2d, v27.2d
+	ZIP12_D v17, v18, v8, v26
+	ZIP12_D v19, v20, v25, v27
 
-	zip1 v21.2d, v28.2d, v30.2d
-	zip2 v22.2d, v28.2d, v30.2d
-	zip1 v23.2d, v29.2d, v31.2d
-	zip2 v24.2d, v29.2d, v31.2d
+	ZIP12_D v21, v22, v28, v30
+	ZIP12_D v23, v24, v29, v31
 	.endm
 
 // ── STORE_C_ROWMAJOR：将 blocked v9~v24 按行主序写回 C ────────
@@ -186,25 +190,17 @@
 	add  x16, x12, LDC_B, lsl #2          // 6*LDC = 2+4
 	add  x17, x15, LDC_B, lsl #1          // 7*LDC = 5+2
 
-	zip1 v0.2d, v9.2d,  v10.2d
-	zip1 v1.2d, v11.2d, v12.2d
-	zip2 v2.2d, v9.2d,  v10.2d
-	zip2 v3.2d, v11.2d, v12.2d
+	ZIP12_D v0, v2, v9,  v10
+	ZIP12_D v1, v3, v11, v12
 
-	zip1 v4.2d, v13.2d, v14.2d
-	zip1 v5.2d, v15.2d, v16.2d
-	zip2 v6.2d, v13.2d, v14.2d
-	zip2 v7.2d, v15.2d, v16.2d
+	ZIP12_D v4, v6, v13, v14
+	ZIP12_D v5, v7, v15, v16
 
-	zip1 v8.2d, v17.2d, v18.2d
-	zip1 v25.2d, v19.2d, v20.2d
-	zip2 v26.2d, v17.2d, v18.2d
-	zip2 v27.2d, v19.2d, v20.2d
+	ZIP12_D v8,  v26, v17, v18
+	ZIP12_D v25, v27, v19, v20
 
-	zip1 v28.2d, v21.2d, v22.2d
-	zip1 v29.2d, v23.2d, v24.2d
-	zip2 v30.2d, v21.2d, v22.2d
-	zip2 v31.2d, v23.2d, v24.2d
+	ZIP12_D v28, v30, v21, v22
+	ZIP12_D v29, v31, v23, v24
 
 	stp  q0, q1, [C_M_BASE]
 	stp  q2, q3, [x11]
@@ -218,37 +214,29 @@
 
 // ── STORE_C_ROWMAJOR_B：f32→bf16 转换后存储，每行 16 bytes ──────
 	.macro STORE_C_ROWMAJOR_B
-	zip1 v0.2d, v9.2d,  v10.2d
-	zip1 v1.2d, v11.2d, v12.2d
-	zip2 v2.2d, v9.2d,  v10.2d
-	zip2 v3.2d, v11.2d, v12.2d
+	ZIP12_D v0, v2, v9,  v10
+	ZIP12_D v1, v3, v11, v12
 	bfcvtn  v0.4h, v0.4s
 	bfcvtn2 v0.8h, v1.4s
 	bfcvtn  v1.4h, v2.4s
 	bfcvtn2 v1.8h, v3.4s
 
-	zip1 v4.2d, v13.2d, v14.2d
-	zip1 v5.2d, v15.2d, v16.2d
-	zip2 v6.2d, v13.2d, v14.2d
-	zip2 v7.2d, v15.2d, v16.2d
+	ZIP12_D v4, v6, v13, v14
+	ZIP12_D v5, v7, v15, v16
 	bfcvtn  v2.4h, v4.4s
 	bfcvtn2 v2.8h, v5.4s
 	bfcvtn  v3.4h, v6.4s
 	bfcvtn2 v3.8h, v7.4s
 
-	zip1 v8.2d, v17.2d, v18.2d
-	zip1 v25.2d, v19.2d, v20.2d
-	zip2 v26.2d, v17.2d, v18.2d
-	zip2 v27.2d, v19.2d, v20.2d
+	ZIP12_D v8,  v26, v17, v18
+	ZIP12_D v25, v27, v19, v20
 	bfcvtn  v4.4h, v8.4s
 	bfcvtn2 v4.8h, v25.4s
 	bfcvtn  v5.4h, v26.4s
 	bfcvtn2 v5.8h, v27.4s
 
-	zip1 v28.2d, v21.2d, v22.2d
-	zip1 v29.2d, v23.2d, v24.2d
-	zip2 v30.2d, v21.2d, v22.2d
-	zip2 v31.2d, v23.2d, v24.2d
+	ZIP12_D v28, v30, v21, v22
+	ZIP12_D v29, v31, v23, v24
 	bfcvtn  v6.4h, v28.4s
 	bfcvtn2 v6.8h, v29.4s
 	bfcvtn  v7.4h, v30.4s
@@ -658,17 +646,13 @@ GEMM_BODY bf16gemm_k_ld_b, 8, 8, LOAD_C_ROWMAJOR_B, STORE_C_ROWMAJOR_B, 1, 16
 	add  x11, C_M_BASE, LDC_B          // row1
 	ldp  q0, q1, [C_M_BASE]            // row0: col0-3, col4-7
 	ldp  q2, q3, [x11]                 // row1: col0-3, col4-7
-	zip1 v9.2d,  v0.2d, v2.2d          // [r0c0,r0c1,r1c0,r1c1]
-	zip2 v10.2d, v0.2d, v2.2d          // [r0c2,r0c3,r1c2,r1c3]
-	zip1 v11.2d, v1.2d, v3.2d          // [r0c4,r0c5,r1c4,r1c5]
-	zip2 v12.2d, v1.2d, v3.2d          // [r0c6,r0c7,r1c6,r1c7]
+	ZIP12_D v9,  v10, v0, v2
+	ZIP12_D v11, v12, v1, v3
 .endm
 
 .macro STORE_C_2
-	zip1 v0.2d, v9.2d,  v10.2d         // row0: col0-3
-	zip1 v1.2d, v11.2d, v12.2d         // row0: col4-7
-	zip2 v2.2d, v9.2d,  v10.2d         // row1: col0-3
-	zip2 v3.2d, v11.2d, v12.2d         // row1: col4-7
+	ZIP12_D v0, v2, v9,  v10
+	ZIP12_D v1, v3, v11, v12
 	add  x11, C_M_BASE, LDC_B
 	stp  q0, q1, [C_M_BASE]
 	stp  q2, q3, [x11]
@@ -681,15 +665,13 @@ GEMM_BODY bf16gemm_k_ld_b, 8, 8, LOAD_C_ROWMAJOR_B, STORE_C_ROWMAJOR_B, 1, 16
 	ldp  q0, q1, [C_M_BASE]            // row0: col0-3, col4-7
 	movi v2.16b, #0                    // row1 填零（虚拟行）
 	movi v3.16b, #0
-	zip1 v9.2d,  v0.2d, v2.2d
-	zip2 v10.2d, v0.2d, v2.2d
-	zip1 v11.2d, v1.2d, v3.2d
-	zip2 v12.2d, v1.2d, v3.2d
+	ZIP12_D v9,  v10, v0, v2
+	ZIP12_D v11, v12, v1, v3
 .endm
 
 .macro STORE_C_1
 	// 只写 row0
-	zip1 v0.2d, v9.2d,  v10.2d         // row0: col0-3
+	zip1 v0.2d, v9.2d, v10.2d          // row0: col0-3
 	zip1 v1.2d, v11.2d, v12.2d         // row0: col4-7
 	stp  q0, q1, [C_M_BASE]
 .endm
@@ -708,15 +690,11 @@ GEMM_BODY bf16gemm_k_ld_b, 8, 8, LOAD_C_ROWMAJOR_B, STORE_C_ROWMAJOR_B, 1, 16
 	ldp  q4, q5, [x12]
 	ldp  q6, q7, [x13]
 
-	zip1 v9.2d,  v0.2d, v2.2d
-	zip2 v10.2d, v0.2d, v2.2d
-	zip1 v11.2d, v1.2d, v3.2d
-	zip2 v12.2d, v1.2d, v3.2d
+	ZIP12_D v9,  v10, v0, v2
+	ZIP12_D v11, v12, v1, v3
 
-	zip1 v13.2d, v4.2d, v6.2d
-	zip2 v14.2d, v4.2d, v6.2d
-	zip1 v15.2d, v5.2d, v7.2d
-	zip2 v16.2d, v5.2d, v7.2d
+	ZIP12_D v13, v14, v4, v6
+	ZIP12_D v15, v16, v5, v7
 .endm
 
 .macro STORE_C_4
@@ -725,15 +703,11 @@ GEMM_BODY bf16gemm_k_ld_b, 8, 8, LOAD_C_ROWMAJOR_B, STORE_C_ROWMAJOR_B, 1, 16
 	add  x14, C_M_BASE, LDC_B, lsl #2
 	sub  x13, x14, LDC_B
 
-	zip1 v0.2d, v9.2d,  v10.2d
-	zip1 v1.2d, v11.2d, v12.2d
-	zip2 v2.2d, v9.2d,  v10.2d
-	zip2 v3.2d, v11.2d, v12.2d
+	ZIP12_D v0, v2, v9,  v10
+	ZIP12_D v1, v3, v11, v12
 
-	zip1 v4.2d, v13.2d, v14.2d
-	zip1 v5.2d, v15.2d, v16.2d
-	zip2 v6.2d, v13.2d, v14.2d
-	zip2 v7.2d, v15.2d, v16.2d
+	ZIP12_D v4, v6, v13, v14
+	ZIP12_D v5, v7, v15, v16
 
 	stp  q0, q1, [C_M_BASE]
 	stp  q2, q3, [x11]
@@ -743,58 +717,74 @@ GEMM_BODY bf16gemm_k_ld_b, 8, 8, LOAD_C_ROWMAJOR_B, STORE_C_ROWMAJOR_B, 1, 16
 
 // ── LOAD_C_B 系列：bf16→f32 转换 ─────────────────────────────────
 	.macro LOAD_C_1_B
-	ldr  q0, [C_M_BASE]; shll  v2.4s, v0.4h, #16; shll2 v3.4s, v0.8h, #16
-	movi v4.16b, #0; movi v5.16b, #0
-	zip1 v9.2d,  v2.2d, v4.2d; zip2 v10.2d, v2.2d, v4.2d
-	zip1 v11.2d, v3.2d, v5.2d; zip2 v12.2d, v3.2d, v5.2d
+	LOAD_BF16_ROW_F32 C_M_BASE, v2, v3
+	movi v4.16b, #0
+	movi v5.16b, #0
+	ZIP12_D v9,  v10, v2, v4
+	ZIP12_D v11, v12, v3, v5
 	.endm
 	.macro LOAD_C_2_B
 	add  x11, C_M_BASE, LDC_B
-	ldr  q0, [C_M_BASE]; shll  v2.4s, v0.4h, #16; shll2 v3.4s, v0.8h, #16
-	ldr  q0, [x11];       shll  v4.4s, v0.4h, #16; shll2 v5.4s, v0.8h, #16
-	zip1 v9.2d,  v2.2d, v4.2d; zip2 v10.2d, v2.2d, v4.2d
-	zip1 v11.2d, v3.2d, v5.2d; zip2 v12.2d, v3.2d, v5.2d
+	LOAD_BF16_ROW_F32 C_M_BASE, v2, v3
+	LOAD_BF16_ROW_F32 x11, v4, v5
+	ZIP12_D v9,  v10, v2, v4
+	ZIP12_D v11, v12, v3, v5
 	.endm
 	.macro LOAD_C_4_B
-	add  x11, C_M_BASE, LDC_B; add  x12, C_M_BASE, LDC_B, lsl #1
-	add  x14, C_M_BASE, LDC_B, lsl #2; sub  x13, x14, LDC_B
-	ldr  q0, [C_M_BASE]; shll  v2.4s, v0.4h, #16; shll2 v3.4s, v0.8h, #16
-	ldr  q0, [x11];       shll  v4.4s, v0.4h, #16; shll2 v5.4s, v0.8h, #16
-	zip1 v9.2d,  v2.2d, v4.2d; zip2 v10.2d, v2.2d, v4.2d
-	zip1 v11.2d, v3.2d, v5.2d; zip2 v12.2d, v3.2d, v5.2d
-	ldr  q0, [x12];       shll  v2.4s, v0.4h, #16; shll2 v3.4s, v0.8h, #16
-	ldr  q0, [x13];       shll  v4.4s, v0.4h, #16; shll2 v5.4s, v0.8h, #16
-	zip1 v13.2d, v2.2d, v4.2d; zip2 v14.2d, v2.2d, v4.2d
-	zip1 v15.2d, v3.2d, v5.2d; zip2 v16.2d, v3.2d, v5.2d
+	add  x11, C_M_BASE, LDC_B
+	add  x12, C_M_BASE, LDC_B, lsl #1
+	add  x14, C_M_BASE, LDC_B, lsl #2
+	sub  x13, x14, LDC_B
+	LOAD_BF16_ROW_F32 C_M_BASE, v2, v3
+	LOAD_BF16_ROW_F32 x11, v4, v5
+	ZIP12_D v9,  v10, v2, v4
+	ZIP12_D v11, v12, v3, v5
+	LOAD_BF16_ROW_F32 x12, v2, v3
+	LOAD_BF16_ROW_F32 x13, v4, v5
+	ZIP12_D v13, v14, v2, v4
+	ZIP12_D v15, v16, v3, v5
 	.endm
 
 // ── STORE_C_B 系列：f32→bf16 转换 ─────────────────────────────────
 	.macro STORE_C_1_B
-	zip1 v0.2d, v9.2d,  v10.2d; zip1 v1.2d, v11.2d, v12.2d
-	bfcvtn  v2.4h, v0.4s; bfcvtn2 v2.8h, v1.4s
+	zip1 v0.2d, v9.2d, v10.2d
+	zip1 v1.2d, v11.2d, v12.2d
+	bfcvtn  v2.4h, v0.4s
+	bfcvtn2 v2.8h, v1.4s
 	str  q2, [C_M_BASE]
 	.endm
 	.macro STORE_C_2_B
-	zip1 v0.2d, v9.2d,  v10.2d; zip1 v1.2d, v11.2d, v12.2d
-	zip2 v2.2d, v9.2d,  v10.2d; zip2 v3.2d, v11.2d, v12.2d
-	bfcvtn  v4.4h, v0.4s; bfcvtn2 v4.8h, v1.4s
-	bfcvtn  v5.4h, v2.4s; bfcvtn2 v5.8h, v3.4s
+	ZIP12_D v0, v2, v9,  v10
+	ZIP12_D v1, v3, v11, v12
+	bfcvtn  v4.4h, v0.4s
+	bfcvtn2 v4.8h, v1.4s
+	bfcvtn  v5.4h, v2.4s
+	bfcvtn2 v5.8h, v3.4s
 	add  x11, C_M_BASE, LDC_B
-	str  q4, [C_M_BASE]; str  q5, [x11]
+	str  q4, [C_M_BASE]
+	str  q5, [x11]
 	.endm
 	.macro STORE_C_4_B
-	add  x11, C_M_BASE, LDC_B; add  x12, C_M_BASE, LDC_B, lsl #1
-	add  x14, C_M_BASE, LDC_B, lsl #2; sub  x13, x14, LDC_B
-	zip1 v0.2d, v9.2d,  v10.2d; zip1 v1.2d, v11.2d, v12.2d
-	zip2 v2.2d, v9.2d,  v10.2d; zip2 v3.2d, v11.2d, v12.2d
-	zip1 v4.2d, v13.2d, v14.2d; zip1 v5.2d, v15.2d, v16.2d
-	zip2 v6.2d, v13.2d, v14.2d; zip2 v7.2d, v15.2d, v16.2d
-	bfcvtn  v25.4h, v0.4s; bfcvtn2 v25.8h, v1.4s
-	bfcvtn  v26.4h, v2.4s; bfcvtn2 v26.8h, v3.4s
-	bfcvtn  v27.4h, v4.4s; bfcvtn2 v27.8h, v5.4s
-	bfcvtn  v28.4h, v6.4s; bfcvtn2 v28.8h, v7.4s
-	str  q25, [C_M_BASE]; str  q26, [x11]
-	str  q27, [x12];      str  q28, [x13]
+	add  x11, C_M_BASE, LDC_B
+	add  x12, C_M_BASE, LDC_B, lsl #1
+	add  x14, C_M_BASE, LDC_B, lsl #2
+	sub  x13, x14, LDC_B
+	ZIP12_D v0, v2, v9,  v10
+	ZIP12_D v1, v3, v11, v12
+	ZIP12_D v4, v6, v13, v14
+	ZIP12_D v5, v7, v15, v16
+	bfcvtn  v25.4h, v0.4s
+	bfcvtn2 v25.8h, v1.4s
+	bfcvtn  v26.4h, v2.4s
+	bfcvtn2 v26.8h, v3.4s
+	bfcvtn  v27.4h, v4.4s
+	bfcvtn2 v27.8h, v5.4s
+	bfcvtn  v28.4h, v6.4s
+	bfcvtn2 v28.8h, v7.4s
+	str  q25, [C_M_BASE]
+	str  q26, [x11]
+	str  q27, [x12]
+	str  q28, [x13]
 	.endm
 
 // ════════════════════════════════════════════════════════════════════
@@ -1093,10 +1083,7 @@ GEMM_BODY bf16gemm_k_ld_b, 8, 8, LOAD_C_ROWMAJOR_B, STORE_C_ROWMAJOR_B, 1, 16
 	.endm
 
 	.macro LOAD_ZERO_1
-	movi v9.4s, #0
-	movi v10.4s, #0
-	movi v11.4s, #0
-	movi v12.4s, #0
+	LOAD_ZERO_2
 	.endm
 
 	.macro LOAD_ZERO_4
