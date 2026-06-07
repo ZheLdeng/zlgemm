@@ -9,10 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bf16gemm_sve.h"
 #include "gemm_params.h"
-
-typedef uint16_t bf16_t;
-typedef float f32_t;
 
 static size_t round_up_64(size_t size) {
     return (size + 63u) & ~(size_t)63u;
@@ -34,6 +32,167 @@ static int bf16_sve_n_tile(void) {
 
 static int round_up_int(int x, int q) {
     return ((x + q - 1) / q) * q;
+}
+
+static bf16gemm_sve_schedule_t bf16_sve_schedule = {
+    BF16GEMM_SVE_SPLIT_AUTO,
+    1,
+    -1,
+    512u * 1024u,
+    24,
+    64
+};
+
+void bf16gemm_sve_get_default_schedule(bf16gemm_sve_schedule_t *schedule) {
+    if (!schedule)
+        return;
+    schedule->split_policy = BF16GEMM_SVE_SPLIT_AUTO;
+    schedule->clamp_threads = 1;
+    schedule->no_reorder_max_m = -1;
+    schedule->n_split_min_b_panel_bytes = 512u * 1024u;
+    schedule->n_split_m12_min_m = 24;
+    schedule->n_split_m12_min_k = 64;
+}
+
+void bf16gemm_sve_set_schedule(const bf16gemm_sve_schedule_t *schedule) {
+    if (!schedule) {
+        bf16gemm_sve_get_default_schedule(&bf16_sve_schedule);
+        return;
+    }
+
+    bf16_sve_schedule = *schedule;
+    if (bf16_sve_schedule.split_policy < BF16GEMM_SVE_SPLIT_AUTO ||
+        bf16_sve_schedule.split_policy > BF16GEMM_SVE_SPLIT_OLD)
+        bf16_sve_schedule.split_policy = BF16GEMM_SVE_SPLIT_AUTO;
+    bf16_sve_schedule.clamp_threads = bf16_sve_schedule.clamp_threads != 0;
+    if (bf16_sve_schedule.no_reorder_max_m < -1)
+        bf16_sve_schedule.no_reorder_max_m = -1;
+    if (bf16_sve_schedule.n_split_min_b_panel_bytes == 0)
+        bf16_sve_schedule.n_split_min_b_panel_bytes = 512u * 1024u;
+    if (bf16_sve_schedule.n_split_m12_min_m < 0)
+        bf16_sve_schedule.n_split_m12_min_m = 0;
+    if (bf16_sve_schedule.n_split_m12_min_k < 0)
+        bf16_sve_schedule.n_split_m12_min_k = 0;
+}
+
+void bf16gemm_sve_get_schedule(bf16gemm_sve_schedule_t *schedule) {
+    if (schedule)
+        *schedule = bf16_sve_schedule;
+}
+
+int bf16gemm_sve_get_n_tile(void) {
+    return bf16_sve_n_tile();
+}
+
+int bf16gemm_sve_round_k(int K) {
+    return round_up_int(K < 8 ? 8 : K, 8);
+}
+
+int bf16gemm_sve_round_n(int N) {
+    return round_up_int(N < 8 ? 8 : N, bf16_sve_n_tile());
+}
+
+static int bf16_no_reorder_max_m_env(int *has_env) {
+    static int value = -1;
+    static int present = -1;
+    if (value < 0) {
+        const char *env = getenv("BF16_SVE_NOREORDER_MAX_M");
+        present = env != NULL;
+        value = present ? atoi(env) : 0;
+        if (value < 0)
+            value = 0;
+    }
+    if (has_env)
+        *has_env = present;
+    return value;
+}
+
+static int bf16_use_no_reorder_for_shape(int M, int n_tiles) {
+    int has_env = 0;
+    int max_m = bf16_sve_schedule.no_reorder_max_m;
+    int env_max_m = bf16_no_reorder_max_m_env(&has_env);
+    if (has_env)
+        max_m = env_max_m;
+    if (max_m >= 0)
+        return max_m > 0 && M <= max_m;
+    return M <= 8 && n_tiles <= 2;
+}
+
+static int bf16_effective_threads(int num_threads, int M, int K_r, int N_r,
+                                  int n_tiles) {
+    if (num_threads <= 0)
+        num_threads = omp_get_max_threads();
+    if (num_threads <= 0)
+        num_threads = 1;
+    int clamp_threads = bf16_sve_schedule.clamp_threads;
+    const char *clamp_env = getenv("BF16_SVE_CLAMP_THREADS");
+    if (clamp_env)
+        clamp_threads = atoi(clamp_env) != 0;
+    if (!clamp_threads)
+        return num_threads;
+
+    const int m_blocks = (M + 7) / 8;
+    int work_units = m_blocks * n_tiles;
+    if (work_units < 1)
+        work_units = 1;
+    if (num_threads > work_units)
+        num_threads = work_units;
+
+    /*
+     * Very small N-tile counts do not have enough independent work to amortize
+     * an OpenMP team. Keep at least four N tiles per thread for sub-64-row
+     * shapes; larger shapes still benefit from M splitting.
+     */
+    if (M < 64 && n_tiles < num_threads * 4) {
+        int by_n = (n_tiles + 3) / 4;
+        if (by_n < 1)
+            by_n = 1;
+        if (num_threads > by_n)
+            num_threads = by_n;
+    }
+
+    return num_threads;
+}
+
+static int bf16_use_n_split(int M, int K_r, int N_r, int n_tiles,
+                            int num_threads) {
+    const char *split = getenv("BF16_SVE_SPLIT");
+    if (split) {
+        if (strcmp(split, "m") == 0)
+            return 0;
+        if (strcmp(split, "n") == 0)
+            return n_tiles >= num_threads;
+        if (strcmp(split, "old") == 0)
+            return !(M / 8 >= num_threads || n_tiles < num_threads);
+    }
+
+    switch (bf16_sve_schedule.split_policy) {
+    case BF16GEMM_SVE_SPLIT_M:
+        return 0;
+    case BF16GEMM_SVE_SPLIT_N:
+        return n_tiles >= num_threads;
+    case BF16GEMM_SVE_SPLIT_OLD:
+        return !(M / 8 >= num_threads || n_tiles < num_threads);
+    case BF16GEMM_SVE_SPLIT_AUTO:
+    default:
+        break;
+    }
+
+    if (num_threads <= 1)
+        return 0;
+    if (n_tiles < num_threads)
+        return 0;
+    if (M / 8 < num_threads)
+        return 1;
+
+    /*
+     * M splitting duplicates the whole B panel across threads. Prefer N
+     * splitting when B is clearly wider than A, because it partitions B and
+     * only duplicates the usually smaller packed-A stream.
+     */
+    const size_t b_panel_bytes = (size_t)K_r * (size_t)N_r * sizeof(bf16_t);
+    return b_panel_bytes >= bf16_sve_schedule.n_split_min_b_panel_bytes &&
+           N_r >= M * 2;
 }
 
 static size_t bf16_a_reorder_stride(int K_r) {
@@ -207,18 +366,18 @@ static void bf16_dispatch_bf16(const bf16_t *A, const bf16_t *B_reo,
 void bf16gemm_mt_dispatch(const bf16_t *A, const bf16_t *B_reo,
                           f32_t *C, int M, int K_r, int N_r,
                           int num_threads) {
-    if (num_threads <= 0)
-        num_threads = omp_get_max_threads();
-    if (num_threads <= 0)
-        num_threads = 1;
     const int n_tile = bf16_sve_n_tile();
     const int n_tiles = N_r / n_tile;
+    num_threads = bf16_effective_threads(num_threads, M, K_r, N_r, n_tiles);
     const size_t a_stride = bf16_a_reorder_stride(K_r);
+    const int no_reorder = bf16_use_no_reorder_for_shape(M, n_tiles);
+    const int use_n_split = bf16_use_n_split(M, K_r, N_r, n_tiles, num_threads);
 
-    if (M / 8 >= num_threads || n_tiles < num_threads) {
+    if (!use_n_split) {
         int blocks12 = M / 12;
         int m12_end = 0;
-        bf16_t *A_reo12_pool = bf16_prepare_A_reorder_pool_m12(A, blocks12, K_r, num_threads);
+        bf16_t *A_reo12_pool = no_reorder ? NULL :
+            bf16_prepare_A_reorder_pool_m12(A, blocks12, K_r, num_threads);
         if (A_reo12_pool) {
             const size_t a12_stride = (size_t)K_r * 12;
             #pragma omp parallel for num_threads(num_threads) schedule(static)
@@ -233,8 +392,9 @@ void bf16gemm_mt_dispatch(const bf16_t *A, const bf16_t *B_reo,
         }
 
         int tail_M = M - m12_end;
-        bf16_t *A_reo_pool = bf16_prepare_A_reorder_pool(A + (size_t)m12_end * K_r,
-                                                         tail_M, K_r, num_threads);
+        bf16_t *A_reo_pool = no_reorder ? NULL :
+            bf16_prepare_A_reorder_pool(A + (size_t)m12_end * K_r,
+                                        tail_M, K_r, num_threads);
         #pragma omp parallel for num_threads(num_threads) schedule(static)
         for (int m0 = m12_end; m0 < M; m0 += 8) {
             int mb = M - m0 < 8 ? M - m0 : 8;
@@ -245,13 +405,37 @@ void bf16gemm_mt_dispatch(const bf16_t *A, const bf16_t *B_reo,
         free(A_reo_pool);
         free(A_reo12_pool);
     } else {
-        bf16_t *A_reo_pool = bf16_prepare_A_reorder_pool(A, M, K_r, num_threads);
+        int blocks12 = (!no_reorder &&
+                        M >= bf16_sve_schedule.n_split_m12_min_m &&
+                        K_r >= bf16_sve_schedule.n_split_m12_min_k) ?
+                       M / 12 : 0;
+        int m12_end = blocks12 * 12;
+        bf16_t *A_reo12_pool = blocks12 > 0 ?
+            bf16_prepare_A_reorder_pool_m12(A, blocks12, K_r, num_threads) : NULL;
+        if (!A_reo12_pool)
+            m12_end = 0;
+        int tail_M = M - m12_end;
+        bf16_t *A_reo_pool = no_reorder ? NULL :
+            bf16_prepare_A_reorder_pool(A + (size_t)m12_end * K_r,
+                                        tail_M, K_r, num_threads);
         #pragma omp parallel for num_threads(num_threads) schedule(static)
         for (int t = 0; t < n_tiles; t++) {
             int n0 = t * n_tile;
-            for (int m0 = 0; m0 < M; m0 += 8) {
+            if (A_reo12_pool) {
+                const size_t a12_stride = (size_t)K_r * 12;
+                for (int b = 0; b < blocks12; b++) {
+                    gemm_params_t p = {12, K_r, n_tile, K_r, K_r, N_r};
+                    int m0 = b * 12;
+                    bf16gemm_k_nld_f_m12(A + (size_t)m0 * K_r,
+                                         B_reo + (size_t)t * K_r * n_tile,
+                                         C + (size_t)m0 * N_r + n0,
+                                         A_reo12_pool + (size_t)b * a12_stride,
+                                         &p);
+                }
+            }
+            for (int m0 = m12_end; m0 < M; m0 += 8) {
                 int mb = M - m0 < 8 ? M - m0 : 8;
-                bf16_t *A_reo = A_reo_pool ? A_reo_pool + (size_t)(m0 / 8) * a_stride : NULL;
+                bf16_t *A_reo = A_reo_pool ? A_reo_pool + (size_t)((m0 - m12_end) / 8) * a_stride : NULL;
                 bf16_dispatch_f32(A + (size_t)m0 * K_r,
                                   B_reo + (size_t)t * K_r * n_tile,
                                   C + (size_t)m0 * N_r + n0,
@@ -259,22 +443,23 @@ void bf16gemm_mt_dispatch(const bf16_t *A, const bf16_t *B_reo,
             }
         }
         free(A_reo_pool);
+        free(A_reo12_pool);
     }
 }
 
 void bf16gemm_mt_dispatch_bias_f(const bf16_t *A, const bf16_t *B_reo,
                                  f32_t *C, int M, int K_r, int N_r,
                                  int num_threads, const f32_t *bias) {
-    if (num_threads <= 0)
-        num_threads = omp_get_max_threads();
-    if (num_threads <= 0)
-        num_threads = 1;
     const int n_tile = bf16_sve_n_tile();
     const int n_tiles = N_r / n_tile;
+    num_threads = bf16_effective_threads(num_threads, M, K_r, N_r, n_tiles);
     const size_t a_stride = bf16_a_reorder_stride(K_r);
-    bf16_t *A_reo_pool = bf16_prepare_A_reorder_pool(A, M, K_r, num_threads);
+    const int no_reorder = bf16_use_no_reorder_for_shape(M, n_tiles);
+    const int use_n_split = bf16_use_n_split(M, K_r, N_r, n_tiles, num_threads);
+    bf16_t *A_reo_pool = no_reorder ? NULL :
+        bf16_prepare_A_reorder_pool(A, M, K_r, num_threads);
 
-    if (M / 8 >= num_threads || n_tiles < num_threads) {
+    if (!use_n_split) {
         #pragma omp parallel for num_threads(num_threads) schedule(static)
         for (int m0 = 0; m0 < M; m0 += 8) {
             int mb = M - m0 < 8 ? M - m0 : 8;
@@ -302,16 +487,16 @@ void bf16gemm_mt_dispatch_bias_f(const bf16_t *A, const bf16_t *B_reo,
 void bf16gemm_mt_dispatch_nld_b(const bf16_t *A, const bf16_t *B_reo,
                                 bf16_t *C, int M, int K_r, int N_r,
                                 int num_threads) {
-    if (num_threads <= 0)
-        num_threads = omp_get_max_threads();
-    if (num_threads <= 0)
-        num_threads = 1;
     const int n_tile = bf16_sve_n_tile();
     const int n_tiles = N_r / n_tile;
+    num_threads = bf16_effective_threads(num_threads, M, K_r, N_r, n_tiles);
     const size_t a_stride = bf16_a_reorder_stride(K_r);
-    bf16_t *A_reo_pool = bf16_prepare_A_reorder_pool(A, M, K_r, num_threads);
+    const int no_reorder = bf16_use_no_reorder_for_shape(M, n_tiles);
+    const int use_n_split = bf16_use_n_split(M, K_r, N_r, n_tiles, num_threads);
+    bf16_t *A_reo_pool = no_reorder ? NULL :
+        bf16_prepare_A_reorder_pool(A, M, K_r, num_threads);
 
-    if (M / 8 >= num_threads || n_tiles < num_threads) {
+    if (!use_n_split) {
         #pragma omp parallel for num_threads(num_threads) schedule(static)
         for (int m0 = 0; m0 < M; m0 += 8) {
             int mb = M - m0 < 8 ? M - m0 : 8;
@@ -429,4 +614,42 @@ void bf16gemm_mt_nld_b(const bf16_t *A_orig, const bf16_t *B_orig,
     if (A_use != A_orig)
         free(A_use);
     free(B_reo);
+}
+
+void bf16gemm_sve_pack_B(const bf16_t *B, bf16_t *B_reo, int K, int N) {
+    bf16_pack_B(B, B_reo, K, N);
+}
+
+void bf16gemm_sve_dispatch_f32(const bf16_t *A, const bf16_t *B_reo,
+                               f32_t *C, int M, int K_r, int N_r,
+                               int nthreads) {
+    bf16gemm_mt_dispatch(A, B_reo, C, M, K_r, N_r, nthreads);
+}
+
+void bf16gemm_sve_dispatch_bias_f32(const bf16_t *A, const bf16_t *B_reo,
+                                    f32_t *C, int M, int K_r, int N_r,
+                                    int nthreads, const f32_t *bias) {
+    bf16gemm_mt_dispatch_bias_f(A, B_reo, C, M, K_r, N_r, nthreads, bias);
+}
+
+void bf16gemm_sve_dispatch_bf16(const bf16_t *A, const bf16_t *B_reo,
+                                bf16_t *C, int M, int K_r, int N_r,
+                                int nthreads) {
+    bf16gemm_mt_dispatch_nld_b(A, B_reo, C, M, K_r, N_r, nthreads);
+}
+
+void bf16gemm_sve_f32(const bf16_t *A_orig, const bf16_t *B_orig,
+                      f32_t *C, int M, int K, int N, int nthreads) {
+    bf16gemm_mt(A_orig, B_orig, C, M, K, N, nthreads);
+}
+
+void bf16gemm_sve_bias_f32(const bf16_t *A_orig, const bf16_t *B_orig,
+                           f32_t *C, int M, int K, int N, int nthreads,
+                           const f32_t *bias) {
+    bf16gemm_mt_bias_f(A_orig, B_orig, C, M, K, N, nthreads, bias);
+}
+
+void bf16gemm_sve_bf16(const bf16_t *A_orig, const bf16_t *B_orig,
+                       bf16_t *C, int M, int K, int N, int nthreads) {
+    bf16gemm_mt_nld_b(A_orig, B_orig, C, M, K, N, nthreads);
 }

@@ -102,6 +102,45 @@
 	mov z31.s, #0
 	.endm
 
+	.macro INIT_ACC_ZERO
+	ZERO_ACC
+	.endm
+
+	.macro INIT_ACC_BIAS
+	index z9.s, #0, #1
+	mov z10.d, z9.d
+	and z10.s, z10.s, #3
+	lsr z11.s, z9.s, #2
+	lsl z11.s, z11.s, #5
+	mov z12.d, z10.d
+	and z12.s, z12.s, #1
+	lsl z12.s, z12.s, #2
+	add z15.s, z11.s, z12.s
+	mov z13.d, z15.d
+	ld1w {z16.s}, p1/z, [BIAS_N_BASE, z13.s, sxtw]
+	mov z13.d, z15.d
+	add z13.s, z13.s, #8
+	ld1w {z17.s}, p1/z, [BIAS_N_BASE, z13.s, sxtw]
+	mov z13.d, z15.d
+	add z13.s, z13.s, #16
+	ld1w {z18.s}, p1/z, [BIAS_N_BASE, z13.s, sxtw]
+	mov z13.d, z15.d
+	add z13.s, z13.s, #24
+	ld1w {z19.s}, p1/z, [BIAS_N_BASE, z13.s, sxtw]
+	mov z20.d, z16.d
+	mov z21.d, z17.d
+	mov z22.d, z18.d
+	mov z23.d, z19.d
+	mov z24.d, z16.d
+	mov z25.d, z17.d
+	mov z26.d, z18.d
+	mov z27.d, z19.d
+	mov z28.d, z16.d
+	mov z29.d, z17.d
+	mov z30.d, z18.d
+	mov z31.d, z19.d
+	.endm
+
 	.macro LOAD_AB_PACKED a0, a1, a2, a3, b0, b1, b2, b3
 	ld1h {\b0\().h}, p0/z, [B_K_ADDR]
 	ld1h {\b1\().h}, p0/z, [B_K_ADDR, #1, mul vl]
@@ -278,15 +317,6 @@
 	add z9.s, z9.s, z13.s
 	.endm
 
-	.macro ADD_BIAS_ACC acc, bias_imm
-	cbz BIAS_N_BASE, 910\@f
-	mov z13.d, z15.d
-	add z13.s, z13.s, \bias_imm
-	ld1w {z14.s}, p1/z, [BIAS_N_BASE, z13.s, sxtw]
-	fadd \acc\().s, \acc\().s, z14.s
-910\@:
-	.endm
-
 	.macro STORE_8XNTILE_F32
 	mov C_COL_BASE0, C_PAIR_BASE0
 	add C_COL_BASE1, C_PAIR_BASE0, #8
@@ -322,65 +352,7 @@
 	st1w {z31.s}, p1, [C_COL_BASE3, z9.s, sxtw]
 	.endm
 
-	.macro STORE_8XNTILE_F32_BIAS
-	mov C_COL_BASE0, C_PAIR_BASE0
-	add C_COL_BASE1, C_PAIR_BASE0, #8
-	add C_COL_BASE2, C_PAIR_BASE0, #16
-	add C_COL_BASE3, C_PAIR_BASE0, #24
-	mov C_COL_BASE4, C_PAIR_BASE1
-	add C_COL_BASE5, C_PAIR_BASE1, #8
-	ADD_BIAS_ACC z16, #0
-	st1w {z16.s}, p1, [C_COL_BASE0, z9.s, sxtw]
-	ADD_BIAS_ACC z17, #8
-	st1w {z17.s}, p1, [C_COL_BASE1, z9.s, sxtw]
-	add C_COL_BASE0, C_PAIR_BASE1, #16
-	add C_COL_BASE1, C_PAIR_BASE1, #24
-	ADD_BIAS_ACC z18, #16
-	st1w {z18.s}, p1, [C_COL_BASE2, z9.s, sxtw]
-	ADD_BIAS_ACC z19, #24
-	st1w {z19.s}, p1, [C_COL_BASE3, z9.s, sxtw]
-	mov C_COL_BASE2, C_PAIR_BASE2
-	add C_COL_BASE3, C_PAIR_BASE2, #8
-	ADD_BIAS_ACC z20, #0
-	st1w {z20.s}, p1, [C_COL_BASE4, z9.s, sxtw]
-	ADD_BIAS_ACC z21, #8
-	st1w {z21.s}, p1, [C_COL_BASE5, z9.s, sxtw]
-	add C_COL_BASE4, C_PAIR_BASE2, #16
-	add C_COL_BASE5, C_PAIR_BASE2, #24
-	ADD_BIAS_ACC z22, #16
-	st1w {z22.s}, p1, [C_COL_BASE0, z9.s, sxtw]
-	ADD_BIAS_ACC z23, #24
-	st1w {z23.s}, p1, [C_COL_BASE1, z9.s, sxtw]
-	mov C_COL_BASE0, C_PAIR_BASE3
-	add C_COL_BASE1, C_PAIR_BASE3, #8
-	ADD_BIAS_ACC z24, #0
-	st1w {z24.s}, p1, [C_COL_BASE2, z9.s, sxtw]
-	ADD_BIAS_ACC z25, #8
-	st1w {z25.s}, p1, [C_COL_BASE3, z9.s, sxtw]
-	add C_COL_BASE2, C_PAIR_BASE3, #16
-	add C_COL_BASE3, C_PAIR_BASE3, #24
-	ADD_BIAS_ACC z26, #16
-	st1w {z26.s}, p1, [C_COL_BASE4, z9.s, sxtw]
-	ADD_BIAS_ACC z27, #24
-	st1w {z27.s}, p1, [C_COL_BASE5, z9.s, sxtw]
-	ADD_BIAS_ACC z28, #0
-	st1w {z28.s}, p1, [C_COL_BASE0, z9.s, sxtw]
-	ADD_BIAS_ACC z29, #8
-	st1w {z29.s}, p1, [C_COL_BASE1, z9.s, sxtw]
-	ADD_BIAS_ACC z30, #16
-	st1w {z30.s}, p1, [C_COL_BASE2, z9.s, sxtw]
-	ADD_BIAS_ACC z31, #24
-	st1w {z31.s}, p1, [C_COL_BASE3, z9.s, sxtw]
-	.endm
-
 	.macro STORE_BF16_AT base, c_imm, acc
-	add C_COL_BASE0, \base, \c_imm
-	bfcvt z14.h, p1/m, \acc\().s
-	st1h {z14.s}, p1, [C_COL_BASE0, z9.s, sxtw]
-	.endm
-
-	.macro STORE_BF16_AT_BIAS base, c_imm, bias_imm, acc
-	ADD_BIAS_ACC \acc, \bias_imm
 	add C_COL_BASE0, \base, \c_imm
 	bfcvt z14.h, p1/m, \acc\().s
 	st1h {z14.s}, p1, [C_COL_BASE0, z9.s, sxtw]
@@ -405,52 +377,52 @@
 	STORE_BF16_AT C_PAIR_BASE3, #12, z31
 	.endm
 
-	.macro STORE_8XNTILE_BF16_BIAS
-	STORE_BF16_AT_BIAS C_PAIR_BASE0, #0,  #0,  z16
-	STORE_BF16_AT_BIAS C_PAIR_BASE0, #4,  #8,  z17
-	STORE_BF16_AT_BIAS C_PAIR_BASE0, #8,  #16, z18
-	STORE_BF16_AT_BIAS C_PAIR_BASE0, #12, #24, z19
-	STORE_BF16_AT_BIAS C_PAIR_BASE1, #0,  #0,  z20
-	STORE_BF16_AT_BIAS C_PAIR_BASE1, #4,  #8,  z21
-	STORE_BF16_AT_BIAS C_PAIR_BASE1, #8,  #16, z22
-	STORE_BF16_AT_BIAS C_PAIR_BASE1, #12, #24, z23
-	STORE_BF16_AT_BIAS C_PAIR_BASE2, #0,  #0,  z24
-	STORE_BF16_AT_BIAS C_PAIR_BASE2, #4,  #8,  z25
-	STORE_BF16_AT_BIAS C_PAIR_BASE2, #8,  #16, z26
-	STORE_BF16_AT_BIAS C_PAIR_BASE2, #12, #24, z27
-	STORE_BF16_AT_BIAS C_PAIR_BASE3, #0,  #0,  z28
-	STORE_BF16_AT_BIAS C_PAIR_BASE3, #4,  #8,  z29
-	STORE_BF16_AT_BIAS C_PAIR_BASE3, #8,  #16, z30
-	STORE_BF16_AT_BIAS C_PAIR_BASE3, #12, #24, z31
+	.macro STORE_F32_M8
+	BUILD_F32_OFFSETS_AND_BASES
+	STORE_8XNTILE_F32
 	.endm
 
-	.global bf16gemm_k_nld_f_m8
-	.type bf16gemm_k_nld_f_m8, %function
-	.global bf16gemm_k_nld_b_m8
-	.type bf16gemm_k_nld_b_m8, %function
-	.global bf16gemm_k_nld_bias_f_m8
-	.type bf16gemm_k_nld_bias_f_m8, %function
+	.macro STORE_BF16_M8
+	BUILD_BF16_OFFSETS_AND_BASES
+	STORE_8XNTILE_BF16
+	.endm
+
+	.macro BIAS_RESET_NONE
+	.endm
+
+	.macro BIAS_RESET_F32
+	mov BIAS_N_BASE, BIAS_ARG
+	.endm
+
+	.macro BIAS_ADVANCE_NONE
+	.endm
+
+	.macro BIAS_ADVANCE_F32
+	add BIAS_N_BASE, BIAS_N_BASE, C_N_STRIDE
+	.endm
+
+	.macro ADVANCE_C_N_F32
+	add C_N_BASE, C_N_BASE, C_N_STRIDE
+	.endm
+
+	.macro ADVANCE_C_N_BF16
+	add C_N_BASE, C_N_BASE, VL_B
+	.endm
+
+	.macro ADVANCE_C_M_F32
+	add C_ADDR_0, C_ADDR_0, LDC_B, lsl #3
+	.endm
+
+	.macro ADVANCE_C_M_BF16
+	add C_ADDR_0, C_ADDR_0, LDC_B, lsl #2
+	.endm
+
+	.macro GEMM_BODY_M8 func_name, init_acc, store_c, bias_reset, bias_advance, advance_c_n, advance_c_m
+	.global \func_name
+	.type \func_name, %function
 	.p2align 4
-
-bf16gemm_k_nld_f_m8:
-	mov BIAS_ARG, #0
-	mov w6, #0
-	b .L_body
-
-bf16gemm_k_nld_b_m8:
-	mov BIAS_ARG, #0
-	mov w6, #1
-	b .L_body
-
-bf16gemm_k_nld_bias_f_m8:
-	mov w6, #0
-	b .L_body
-
-.L_body:
+\func_name:
 	SAVE_REGS
-	sub sp, sp, #16
-	str BIAS_ARG, [sp]
-	str w6, [sp, #8]
 
 	ldr M_SIZE, [PARAMS]
 	ldr K_SIZE, [PARAMS, #4]
@@ -469,93 +441,66 @@ bf16gemm_k_nld_bias_f_m8:
 	ptrue p0.b
 	ptrue p1.s
 
-.L_m_loop:
+.L_m_loop_\@:
 	cmp M_SIZE, #0
-	b.le .L_done
+	b.le .L_done_\@
 	REORDER_A_M8
 	mov B_N_BASE, B_ADDR
 	mov C_N_BASE, C_ADDR_0
-	ldr BIAS_N_BASE, [sp]
+	\bias_reset
 	mov N_COUNT, N_SIZE
 
-.L_n_loop:
+.L_n_loop_\@:
 	cmp N_COUNT, #0
-	b.le .L_m_next
+	b.le .L_m_next_\@
 
-	ZERO_ACC
+	\init_acc
 	mov B_K_ADDR, B_N_BASE
 	mov A_K_ADDR, A_REORDER_BASE
 	mov K_COUNT, K_SIZE
 
 		LOAD_A0_B0
 	subs K_COUNT, K_COUNT, #4
-	b.eq .L_cached_tail_cur
+	b.eq .L_cached_tail_cur_\@
 
-.L_k_loop:
+.L_k_loop_\@:
 		LOAD_A1_B1_COMPUTE_A0_B0
 	subs K_COUNT, K_COUNT, #4
-	b.eq .L_cached_tail_next
+	b.eq .L_cached_tail_next_\@
 		LOAD_A0_B0_COMPUTE_A1_B1
 	subs K_COUNT, K_COUNT, #4
-	b.gt .L_k_loop
+	b.gt .L_k_loop_\@
 
-.L_cached_tail_cur:
+.L_cached_tail_cur_\@:
 		COMPUTE_A0_B0
-	b .L_k_done
+	b .L_k_done_\@
 
-.L_cached_tail_next:
+.L_cached_tail_next_\@:
 		COMPUTE_A1_B1
 
-.L_k_done:
-	ldr w22, [sp, #8]
-	cbnz w22, .L_store_bf16
-	BUILD_F32_OFFSETS_AND_BASES
-	cbnz BIAS_N_BASE, .L_store_f32_bias
-	STORE_8XNTILE_F32
-	b .L_store_done
-
-.L_store_f32_bias:
-	STORE_8XNTILE_F32_BIAS
-	b .L_store_done
-
-.L_store_bf16:
-	BUILD_BF16_OFFSETS_AND_BASES
-	STORE_8XNTILE_BF16
-
-.L_store_done:
+.L_k_done_\@:
+	\store_c
 	add B_N_BASE, B_N_BASE, B_N_STRIDE
-	cbz BIAS_N_BASE, .L_bias_next_done
-	add BIAS_N_BASE, BIAS_N_BASE, C_N_STRIDE
-.L_bias_next_done:
-	ldr w22, [sp, #8]
-	cbnz w22, .L_advance_c_bf16
-	add C_N_BASE, C_N_BASE, C_N_STRIDE
-	b .L_advance_c_done
-.L_advance_c_bf16:
-	add C_N_BASE, C_N_BASE, VL_B
-.L_advance_c_done:
+	\bias_advance
+	\advance_c_n
 	sub N_COUNT, N_COUNT, NTILE_W
-	b .L_n_loop
+	b .L_n_loop_\@
 
-.L_m_next:
+.L_m_next_\@:
 	add A_REORDER_BASE, A_REORDER_BASE, A_M_STRIDE
 	add A_ADDR_ORG, A_ADDR_ORG, LDA_B, lsl #3
-	ldr w22, [sp, #8]
-	cbnz w22, .L_m_next_c_bf16
-	add C_ADDR_0, C_ADDR_0, LDC_B, lsl #3
-	b .L_m_next_c_done
-.L_m_next_c_bf16:
-	add C_ADDR_0, C_ADDR_0, LDC_B, lsl #2
-.L_m_next_c_done:
+	\advance_c_m
 	subs M_SIZE, M_SIZE, #8
-	b.gt .L_m_loop
+	b.gt .L_m_loop_\@
 
-.L_done:
-	add sp, sp, #16
+.L_done_\@:
 	RESTORE_REGS
 	ret
-	.size bf16gemm_k_nld_f_m8, .-bf16gemm_k_nld_f_m8
-	.size bf16gemm_k_nld_b_m8, .-bf16gemm_k_nld_b_m8
-	.size bf16gemm_k_nld_bias_f_m8, .-bf16gemm_k_nld_bias_f_m8
+	.size \func_name, .-\func_name
+	.endm
+
+	GEMM_BODY_M8 bf16gemm_k_nld_f_m8, INIT_ACC_ZERO, STORE_F32_M8, BIAS_RESET_NONE, BIAS_ADVANCE_NONE, ADVANCE_C_N_F32, ADVANCE_C_M_F32
+	GEMM_BODY_M8 bf16gemm_k_nld_b_m8, INIT_ACC_ZERO, STORE_BF16_M8, BIAS_RESET_NONE, BIAS_ADVANCE_NONE, ADVANCE_C_N_BF16, ADVANCE_C_M_BF16
+	GEMM_BODY_M8 bf16gemm_k_nld_bias_f_m8, INIT_ACC_BIAS, STORE_F32_M8, BIAS_RESET_F32, BIAS_ADVANCE_F32, ADVANCE_C_N_F32, ADVANCE_C_M_F32
 
 	.section .note.GNU-stack,"",@progbits

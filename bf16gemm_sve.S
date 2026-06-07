@@ -52,6 +52,44 @@
 	mov z31.s, #0
 	.endm
 
+	.macro INIT_ACC_OR_BIAS
+	cbz x30, 900\@f
+	index z10.s, #0, #1
+	mov z11.d, z10.d
+	and z11.s, z11.s, #3
+	mov z12.d, z10.d
+	lsr z12.s, z12.s, #2
+	lsl z12.s, z12.s, #5
+	mov z13.d, z11.d
+	and z13.s, z13.s, #1
+	lsl z13.s, z13.s, #2
+	add z10.s, z12.s, z13.s
+	add x3, x30, #0
+	ld1w {z16.s}, p1/z, [x3, z10.s, sxtw]
+	add x3, x30, #8
+	ld1w {z17.s}, p1/z, [x3, z10.s, sxtw]
+	add x3, x30, #16
+	ld1w {z18.s}, p1/z, [x3, z10.s, sxtw]
+	add x3, x30, #24
+	ld1w {z19.s}, p1/z, [x3, z10.s, sxtw]
+	mov z20.d, z16.d
+	mov z21.d, z17.d
+	mov z22.d, z18.d
+	mov z23.d, z19.d
+	mov z24.d, z16.d
+	mov z25.d, z17.d
+	mov z26.d, z18.d
+	mov z27.d, z19.d
+	mov z28.d, z16.d
+	mov z29.d, z17.d
+	mov z30.d, z18.d
+	mov z31.d, z19.d
+	b 901\@f
+900\@:
+	ZERO_ACC
+901\@:
+	.endm
+
 	.macro LOAD_C_PAIR_F32 base, a0, a1, a2, a3
 	ld1w {\a0\().s}, p1/z, [\base, z9.s, sxtw]
 	add x3, \base, #8
@@ -63,7 +101,7 @@
 	.endm
 
 	.macro LOAD_C_ALL_F32
-	ZERO_ACC
+	INIT_ACC_OR_BIAS
 	.endm
 
 	.macro LOAD_A_PAIR_TAIL zd, base, row
@@ -130,11 +168,67 @@
 	mov z23.s, #0
 	.endm
 
+	.macro INIT_ACC_OR_BIAS_M4
+	cbz x30, 900\@f
+	index z10.s, #0, #1
+	mov z11.d, z10.d
+	and z11.s, z11.s, #3
+	mov z12.d, z10.d
+	lsr z12.s, z12.s, #2
+	lsl z12.s, z12.s, #5
+	mov z13.d, z11.d
+	and z13.s, z13.s, #1
+	lsl z13.s, z13.s, #2
+	add z10.s, z12.s, z13.s
+	add x3, x30, #0
+	ld1w {z16.s}, p1/z, [x3, z10.s, sxtw]
+	add x3, x30, #8
+	ld1w {z17.s}, p1/z, [x3, z10.s, sxtw]
+	add x3, x30, #16
+	ld1w {z18.s}, p1/z, [x3, z10.s, sxtw]
+	add x3, x30, #24
+	ld1w {z19.s}, p1/z, [x3, z10.s, sxtw]
+	mov z20.d, z16.d
+	mov z21.d, z17.d
+	mov z22.d, z18.d
+	mov z23.d, z19.d
+	b 901\@f
+900\@:
+	ZERO_ACC_M4
+901\@:
+	.endm
+
 	.macro ZERO_ACC_M2
 	mov z16.s, #0
 	mov z17.s, #0
 	mov z18.s, #0
 	mov z19.s, #0
+	.endm
+
+	.macro INIT_ACC_OR_BIAS_M2
+	cbz x30, 900\@f
+	index z10.s, #0, #1
+	mov z11.d, z10.d
+	and z11.s, z11.s, #3
+	mov z12.d, z10.d
+	lsr z12.s, z12.s, #2
+	lsl z12.s, z12.s, #5
+	mov z13.d, z11.d
+	and z13.s, z13.s, #1
+	lsl z13.s, z13.s, #2
+	add z10.s, z12.s, z13.s
+	add x3, x30, #0
+	ld1w {z16.s}, p1/z, [x3, z10.s, sxtw]
+	add x3, x30, #8
+	ld1w {z17.s}, p1/z, [x3, z10.s, sxtw]
+	add x3, x30, #16
+	ld1w {z18.s}, p1/z, [x3, z10.s, sxtw]
+	add x3, x30, #24
+	ld1w {z19.s}, p1/z, [x3, z10.s, sxtw]
+	b 901\@f
+900\@:
+	ZERO_ACC_M2
+901\@:
 	.endm
 
 	.macro LOAD_AB_PACKED_M4 a0, a1, b0, b1, b2, b3
@@ -347,11 +441,6 @@
 	.endm
 
 	.macro ADD_BIAS_ACC acc, cpbytes
-	cbz x30, 930f
-	add x3, x30, #\cpbytes
-	ld1w {z12.s}, p1/z, [x3, z10.s, sxtw]
-	fadd \acc\().s, \acc\().s, z12.s
-930:
 	.endm
 
 	.macro STORE_ONE_F32 base, pred, acc, cpbytes
@@ -515,6 +604,7 @@ bf16gemm_sve_kernel_asm:
 	b .L_k_done
 
 .L_k_loop_gather:
+	prfm pldl1keep, [x16, #1024]
 	ld1h {z4.h}, p0/z, [x17]
 	add x3, x17, x27
 	ld1h {z5.h}, p0/z, [x3]
@@ -626,7 +716,7 @@ bf16gemm_sve_tail_m4_asm:
 	cmp w10, #0
 	b.le .L_m4_done
 
-	ZERO_ACC_M4
+	INIT_ACC_OR_BIAS_M4
 	mov x17, x11
 	mov x18, x28
 	mov w15, w20
@@ -715,7 +805,7 @@ bf16gemm_sve_tail_m2_asm:
 	cmp w10, #0
 	b.le .L_m2_done
 
-	ZERO_ACC_M2
+	INIT_ACC_OR_BIAS_M2
 	mov x17, x11
 	mov x18, x28
 	mov w15, w20

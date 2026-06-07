@@ -6,11 +6,20 @@ calculate_pack_test
 bench_lda
 bench_lda_cmp
 test_correctness
+test_correctness_sve
 bench_perf
+bench_perf_sve
+bench_nld_sve
 *.o
 
 # Logs
 *.log
+*.xlsx
+*.bak_*
+m8_fulltail_*.csv
+m8_parts_results.csv
+m8_tail_results.csv
+m8_results.xlsx
 
 # IDE / local config
 .claude/settings.local.json
