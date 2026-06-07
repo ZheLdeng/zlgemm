@@ -226,6 +226,31 @@ THREADS=auto c=0-79 ./run_m8_parts.sh
 
 脚本会根据 `c`/`CORES`/`NCORES` 计算可用核心数，并在默认 `SKIP_OVERSUB=1` 时跳过超过可用核心数的线程配置。
 
+默认还会对大 shape 的小线程配置做剪枝：
+
+```text
+ABC bytes = A_bf16 + B_bf16 + C_fp32
+          = 2*M*K + 2*K*N + 4*M*N
+```
+
+当 `ABC > 3MiB` 时，只保留满足 `ceil(ABC / threads) <= 4MiB` 的线程数。小于等于 `3MiB` 的 case 保留全部线程配置。这样跑 80 核 sweep 时，超大矩阵不会继续浪费时间测 1/2/4 核这类每线程数据量过大的点。
+
+相关环境变量：
+
+| 变量 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `PRUNE_BIG_CASE_THREADS` | `1` | 是否启用大 shape 小线程剪枝 |
+| `PRUNE_TOTAL_BYTES` | `3*1024*1024` | 启用剪枝的 ABC 总数据量阈值 |
+| `PRUNE_PER_THREAD_BYTES` | `4*1024*1024` | 每线程理论数据量上限 |
+
+关闭剪枝：
+
+```bash
+PRUNE_BIG_CASE_THREADS=0 THREADS=auto c=0-79 ./run_m8_parts.sh
+```
+
+当前默认 33 shape、`THREADS=auto c=0-79` 时，planned benchmark calls 从未剪枝的 8349 次降到约 6516 次；输出 CSV/XLSX 数据行从 7623 行降到约 5952 行。
+
 #### 常规峰值和 dispatch benchmark
 
 | 文件 | 作用 |

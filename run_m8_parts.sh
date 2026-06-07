@@ -37,6 +37,8 @@ set -euo pipefail
 #   PROGRESS=0 ./run_m8_parts.sh
 #   CASE_MODE=grid ./run_m8_parts.sh
 #   CASES="64,512,4096 2048,4096,1024" ./run_m8_parts.sh
+#   PRUNE_BIG_CASE_THREADS=0 ./run_m8_parts.sh
+#   PRUNE_TOTAL_BYTES=$((3*1024*1024)) PRUNE_PER_THREAD_BYTES=$((4*1024*1024)) ./run_m8_parts.sh
 
 CC=${CC:-cc}
 ARCH_FLAGS=${ARCH_FLAGS:-"-march=armv8.6-a+sve+bf16"}
@@ -103,6 +105,9 @@ RUN_STORES=${RUN_STORES:-1}
 RUN_BASELINES=${RUN_BASELINES:-1}
 RUN_TAILS=${RUN_TAILS:-1}
 PROGRESS=${PROGRESS:-1}
+PRUNE_BIG_CASE_THREADS=${PRUNE_BIG_CASE_THREADS:-1}
+PRUNE_TOTAL_BYTES=${PRUNE_TOTAL_BYTES:-$((3 * 1024 * 1024))}
+PRUNE_PER_THREAD_BYTES=${PRUNE_PER_THREAD_BYTES:-$((4 * 1024 * 1024))}
 
 WORKDIR=${WORKDIR:-"/tmp/m8_parts_${USER}_$$"}
 mkdir -p "$WORKDIR"
@@ -156,6 +161,43 @@ thread_allowed() {
     [[ "$SKIP_OVERSUB" == "0" ]] || (( t <= AVAILABLE_CORES ))
 }
 
+abc_bytes() {
+    local M=$1
+    local K=$2
+    local N=$3
+    echo $((2 * M * K + 2 * K * N + 4 * M * N))
+}
+
+case_thread_allowed() {
+    local M=$1
+    local K=$2
+    local N=$3
+    local T=$4
+    local bytes
+
+    thread_allowed "$T" || return 1
+    if [[ "$PRUNE_BIG_CASE_THREADS" == "0" ]]; then
+        return 0
+    fi
+
+    bytes=$(abc_bytes "$M" "$K" "$N")
+    if (( bytes <= PRUNE_TOTAL_BYTES )); then
+        return 0
+    fi
+    (( (bytes + T - 1) / T <= PRUNE_PER_THREAD_BYTES ))
+}
+
+max_tail_delta() {
+    local d
+    local max=0
+    for d in $TAIL_DELTAS; do
+        if (( d > max )); then
+            max=$d
+        fi
+    done
+    echo "$max"
+}
+
 active_thread_count() {
     local n=0
     local t
@@ -187,17 +229,14 @@ TOTAL_STEPS=0
 STEP=0
 
 count_total_steps() {
-    local nc nt nb np ns nsm nti nd ntail
+    local nc nb np ns nsm nti nd
     nc=$(case_count)
-    nt=$(active_thread_count)
     nb=0
     np=0
     ns=0
     nsm=0
     nti=0
     nd=0
-    ntail=0
-
     if [[ "$RUN_BASELINES" != "0" ]]; then
         nb=$(count_words $BASELINE_IMPLS)
     fi
@@ -209,13 +248,65 @@ count_total_steps() {
         nsm=$(count_words $STORE_MODES)
     fi
     if [[ "$RUN_TAILS" != "0" ]]; then
-        ntail=$(tail_case_count)
         nti=$(count_words $TAIL_IMPLS)
         nd=$(count_words $TAIL_DELTAS)
     fi
 
-    TOTAL_STEPS=$((nc * nt * (nb + np + ns * nsm)))
-    TOTAL_STEPS=$((TOTAL_STEPS + ntail * nt * nti * (1 + nd)))
+    local per_case_parts=$((nb + np + ns * nsm))
+    local per_tail_impl=$((1 + nd))
+    local t M K N case base_M tail_m max_d
+    TOTAL_STEPS=0
+
+    if [[ "$CASE_MODE" == "grid" ]]; then
+        for K in $K_VALUES; do
+            for M in $M_VALUES; do
+                for N in $N_VALUES; do
+                    for t in $THREADS; do
+                        if case_thread_allowed "$M" "$K" "$N" "$t"; then
+                            TOTAL_STEPS=$((TOTAL_STEPS + per_case_parts))
+                        fi
+                    done
+                done
+            done
+        done
+    else
+        for case in $CASES; do
+            IFS=, read -r M K N <<< "$case"
+            for t in $THREADS; do
+                if case_thread_allowed "$M" "$K" "$N" "$t"; then
+                    TOTAL_STEPS=$((TOTAL_STEPS + per_case_parts))
+                fi
+            done
+        done
+    fi
+
+    if [[ "$RUN_TAILS" != "0" ]]; then
+        max_d=$(max_tail_delta)
+        if [[ "$CASE_MODE" == "grid" ]]; then
+            for K in $K_VALUES; do
+                for base_M in $TAIL_BASE_M_VALUES; do
+                    for N in $N_VALUES; do
+                        tail_m=$((base_M + max_d))
+                        for t in $THREADS; do
+                            if case_thread_allowed "$tail_m" "$K" "$N" "$t"; then
+                                TOTAL_STEPS=$((TOTAL_STEPS + nti * per_tail_impl))
+                            fi
+                        done
+                    done
+                done
+            done
+        else
+            for case in $TAIL_CASES; do
+                IFS=, read -r base_M K N <<< "$case"
+                tail_m=$((base_M + max_d))
+                for t in $THREADS; do
+                    if case_thread_allowed "$tail_m" "$K" "$N" "$t"; then
+                        TOTAL_STEPS=$((TOTAL_STEPS + nti * per_tail_impl))
+                    fi
+                done
+            done
+        fi
+    fi
 }
 
 progress() {
@@ -634,6 +725,11 @@ fi
     if [[ "$RUN_TAILS" != "0" ]]; then
         echo "# tail cases: $(tail_case_count)"
     fi
+    if [[ "$PRUNE_BIG_CASE_THREADS" != "0" ]]; then
+        echo "# prune big-case threads: ABC>${PRUNE_TOTAL_BYTES} bytes requires ceil(ABC/threads)<=${PRUNE_PER_THREAD_BYTES} bytes"
+    else
+        echo "# prune big-case threads: disabled"
+    fi
     echo "# OMP_PLACES=$OMP_PLACES OMP_PROC_BIND=$OMP_PROC_BIND"
     count_total_steps
     echo "# planned benchmark calls: $TOTAL_STEPS"
@@ -647,7 +743,7 @@ run_parts_case() {
     local N=$3
     local T impl variant mode
     for T in $THREADS; do
-        if [[ "$SKIP_OVERSUB" != "0" ]] && (( T > AVAILABLE_CORES )); then
+        if ! case_thread_allowed "$M" "$K" "$N" "$T"; then
             continue
         fi
         if [[ "$RUN_BASELINES" != "0" ]]; then
@@ -697,9 +793,11 @@ if [[ "$RUN_TAILS" != "0" ]]; then
         local BASE_M=$1
         local K=$2
         local N=$3
-        local T impl base_line base_gflops D TAIL_M tail_line
+        local T impl base_line base_gflops D TAIL_M tail_line max_d worst_M
+        max_d=$(max_tail_delta)
+        worst_M=$((BASE_M + max_d))
         for T in $THREADS; do
-            if [[ "$SKIP_OVERSUB" != "0" ]] && (( T > AVAILABLE_CORES )); then
+            if ! case_thread_allowed "$worst_M" "$K" "$N" "$T"; then
                 continue
             fi
             for impl in $TAIL_IMPLS; do
