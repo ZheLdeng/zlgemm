@@ -4,9 +4,12 @@ set -euo pipefail
 # Build and run M8 BF16 performance attribution variants.
 #
 # Defaults:
-#   K values: 128 256 512 1024 2048 4096
-#   M values: 16 32 64 128 256 512 1024 2048
-#   N values: 16 32 64 128 256 512 1024 2048 4096 8192
+#   CASE_MODE: shape
+#   Shape-pruned cases are M,K,N triples derived from shape.csv buckets.
+#   Use CASE_MODE=grid to run the full K x M x N Cartesian sweep.
+#   Grid K values: 128 256 512 1024 2048 4096
+#   Grid M values: 16 32 64 128 256 512 1024 2048
+#   Grid N values: 16 32 64 128 256 512 1024 2048 4096 8192
 #   reps:     100
 #   threads:  1
 #
@@ -32,6 +35,8 @@ set -euo pipefail
 #   RESULTS_XLSX=/tmp/m8.xlsx ./run_m8_parts.sh
 #   KEEP_CSV=1 OUT=/tmp/m8_parts.csv TAIL_OUT=/tmp/m8_tail.csv ./run_m8_parts.sh
 #   PROGRESS=0 ./run_m8_parts.sh
+#   CASE_MODE=grid ./run_m8_parts.sh
+#   CASES="64,512,4096 2048,4096,1024" ./run_m8_parts.sh
 
 CC=${CC:-cc}
 ARCH_FLAGS=${ARCH_FLAGS:-"-march=armv8.6-a+sve+bf16"}
@@ -52,6 +57,9 @@ RUNS=${RUNS:-7}
 K_VALUES=${K_VALUES:-"128 256 512 1024 2048 4096"}
 M_VALUES=${M_VALUES:-"16 32 64 128 256 512 1024 2048"}
 N_VALUES=${N_VALUES:-"16 32 64 128 256 512 1024 2048 4096 8192"}
+CASE_MODE=${CASE_MODE:-shape}
+CASES=${CASES:-"16,512,4096 16,4096,1024 32,512,4096 32,4096,1024 64,512,4096 64,4096,1024 128,512,4096 128,4096,1024 256,512,4096 256,4096,1024 512,512,4096 512,4096,1024 1024,512,4096 1024,4096,1024 2048,512,4096 2048,4096,1024 2048,4096,2048 2048,2048,4096 2048,1024,8192"}
+TAIL_CASES=${TAIL_CASES:-"$CASES"}
 THREADS=${THREADS:-"1"}
 DEFAULT_THREADS=${DEFAULT_THREADS:-"1 2 4 8 10 16 20 32 40 64 80"}
 NPROC=$(nproc 2>/dev/null || echo 64)
@@ -140,14 +148,28 @@ active_thread_count() {
     echo "$n"
 }
 
+case_count() {
+    if [[ "$CASE_MODE" == "grid" ]]; then
+        echo $(($(count_words $K_VALUES) * $(count_words $M_VALUES) * $(count_words $N_VALUES)))
+    else
+        count_words $CASES
+    fi
+}
+
+tail_case_count() {
+    if [[ "$CASE_MODE" == "grid" ]]; then
+        echo $(($(count_words $K_VALUES) * $(count_words $TAIL_BASE_M_VALUES) * $(count_words $N_VALUES)))
+    else
+        count_words $TAIL_CASES
+    fi
+}
+
 TOTAL_STEPS=0
 STEP=0
 
 count_total_steps() {
-    local nk nm nn nt nb np ns nsm nti nd nbase
-    nk=$(count_words $K_VALUES)
-    nm=$(count_words $M_VALUES)
-    nn=$(count_words $N_VALUES)
+    local nc nt nb np ns nsm nti nd ntail
+    nc=$(case_count)
     nt=$(active_thread_count)
     nb=0
     np=0
@@ -155,7 +177,7 @@ count_total_steps() {
     nsm=0
     nti=0
     nd=0
-    nbase=0
+    ntail=0
 
     if [[ "$RUN_BASELINES" != "0" ]]; then
         nb=$(count_words $BASELINE_IMPLS)
@@ -168,13 +190,13 @@ count_total_steps() {
         nsm=$(count_words $STORE_MODES)
     fi
     if [[ "$RUN_TAILS" != "0" ]]; then
-        nbase=$(count_words $TAIL_BASE_M_VALUES)
+        ntail=$(tail_case_count)
         nti=$(count_words $TAIL_IMPLS)
         nd=$(count_words $TAIL_DELTAS)
     fi
 
-    TOTAL_STEPS=$((nk * nm * nn * nt * (nb + np + ns * nsm)))
-    TOTAL_STEPS=$((TOTAL_STEPS + nk * nbase * nn * nt * nti * (1 + nd)))
+    TOTAL_STEPS=$((nc * nt * (nb + np + ns * nsm)))
+    TOTAL_STEPS=$((TOTAL_STEPS + ntail * nt * nti * (1 + nd)))
 }
 
 progress() {
@@ -588,79 +610,116 @@ fi
     echo "# core binding: ${CORESET:-none}"
     echo "# available cores: $AVAILABLE_CORES"
     echo "# threads: $THREADS"
+    echo "# case mode: $CASE_MODE"
+    echo "# parts cases: $(case_count)"
+    if [[ "$RUN_TAILS" != "0" ]]; then
+        echo "# tail cases: $(tail_case_count)"
+    fi
     echo "# OMP_PLACES=$OMP_PLACES OMP_PROC_BIND=$OMP_PROC_BIND"
     count_total_steps
     echo "# planned benchmark calls: $TOTAL_STEPS"
 } >&2
 
 echo "variant,mode,cache,M,K,N,threads,KiB,reps,GFLOPS,pct_of_330,pct_of_330xthreads" > "$OUT"
-for K in $K_VALUES; do
-    for M in $M_VALUES; do
-        for N in $N_VALUES; do
-            for T in $THREADS; do
-                if [[ "$SKIP_OVERSUB" != "0" ]] && (( T > AVAILABLE_CORES )); then
-                    continue
-                fi
-                if [[ "$RUN_BASELINES" != "0" ]]; then
-                    for impl in $BASELINE_IMPLS; do
-                        progress "parts impl=${impl}_compute_only mode=f32 M=$M K=$K N=$N threads=$T"
-                        run_bench "$WORKDIR/bench_${impl}_compute_only" "${impl}_compute_only" "$M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" f32 "$T" >> "$OUT"
-                    done
-                fi
-                if [[ "$RUN_PARTS" != "0" ]]; then
-                    for variant in $PART_VARIANTS; do
-                        progress "parts variant=sve_${variant} mode=f32 M=$M K=$K N=$N threads=$T"
-                        run_bench "$WORKDIR/bench_${variant}" "sve_${variant}" "$M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" f32 "$T" >> "$OUT"
-                    done
-                fi
-                if [[ "$RUN_STORES" != "0" ]]; then
-                    for impl in $STORE_IMPLS; do
-                        for mode in $STORE_MODES; do
-                            progress "parts variant=${impl}_${mode} mode=$mode M=$M K=$K N=$N threads=$T"
-                            run_bench "$WORKDIR/bench_store_${impl}" "${impl}_${mode}" "$M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" "$mode" "$T" >> "$OUT"
-                        done
-                    done
-                fi
+
+run_parts_case() {
+    local M=$1
+    local K=$2
+    local N=$3
+    local T impl variant mode
+    for T in $THREADS; do
+        if [[ "$SKIP_OVERSUB" != "0" ]] && (( T > AVAILABLE_CORES )); then
+            continue
+        fi
+        if [[ "$RUN_BASELINES" != "0" ]]; then
+            for impl in $BASELINE_IMPLS; do
+                progress "parts impl=${impl}_compute_only mode=f32 M=$M K=$K N=$N threads=$T"
+                run_bench "$WORKDIR/bench_${impl}_compute_only" "${impl}_compute_only" "$M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" f32 "$T" >> "$OUT"
+            done
+        fi
+        if [[ "$RUN_PARTS" != "0" ]]; then
+            for variant in $PART_VARIANTS; do
+                progress "parts variant=sve_${variant} mode=f32 M=$M K=$K N=$N threads=$T"
+                run_bench "$WORKDIR/bench_${variant}" "sve_${variant}" "$M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" f32 "$T" >> "$OUT"
+            done
+        fi
+        if [[ "$RUN_STORES" != "0" ]]; then
+            for impl in $STORE_IMPLS; do
+                for mode in $STORE_MODES; do
+                    progress "parts variant=${impl}_${mode} mode=$mode M=$M K=$K N=$N threads=$T"
+                    run_bench "$WORKDIR/bench_store_${impl}" "${impl}_${mode}" "$M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" "$mode" "$T" >> "$OUT"
+                done
+            done
+        fi
+    done
+}
+
+if [[ "$CASE_MODE" == "grid" ]]; then
+    for K in $K_VALUES; do
+        for M in $M_VALUES; do
+            for N in $N_VALUES; do
+                run_parts_case "$M" "$K" "$N"
             done
         done
     done
-done
+else
+    for case in $CASES; do
+        IFS=, read -r M K N <<< "$case"
+        run_parts_case "$M" "$K" "$N"
+    done
+fi
 
 echo "wrote $OUT"
 
 if [[ "$RUN_TAILS" != "0" ]]; then
     echo "impl,mode,cache,base_M,tail_M,K,N,threads,KiB,reps,base_GFLOPS,tail_GFLOPS,tail_vs_base_pct,tail_drop_pct,pct_of_330,pct_of_330xthreads" > "$TAIL_OUT"
-    for K in $K_VALUES; do
-        for BASE_M in $TAIL_BASE_M_VALUES; do
-            for N in $N_VALUES; do
-                for T in $THREADS; do
-                    if [[ "$SKIP_OVERSUB" != "0" ]] && (( T > AVAILABLE_CORES )); then
-                        continue
-                    fi
-                    for impl in $TAIL_IMPLS; do
-                        progress "tail-base impl=$impl M=$BASE_M K=$K N=$N threads=$T"
-                        base_line=$(run_bench "$WORKDIR/bench_tail_${impl}" "${impl}_full_base" "$BASE_M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" "$T" "$TAIL_N_ALIGN")
-                        base_gflops=$(awk -F, '{print $10}' <<< "$base_line")
-                        for D in $TAIL_DELTAS; do
-                            TAIL_M=$((BASE_M + D))
-                            progress "tail impl=$impl base_M=$BASE_M tail_M=$TAIL_M K=$K N=$N threads=$T"
-                            tail_line=$(run_bench "$WORKDIR/bench_tail_${impl}" "${impl}_full_tail" "$TAIL_M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" "$T" "$TAIL_N_ALIGN")
-                            awk -F, -v impl="$impl" -v base_m="$BASE_M" -v tail_m="$TAIL_M" -v base_g="$base_gflops" '
-                                {
-                                    tail_g = $10 + 0.0
-                                    rel = (base_g > 0.0) ? tail_g * 100.0 / base_g : 0.0
-                                    drop = 100.0 - rel
-                                    printf "%s,%s,%s,%d,%d,%d,%d,%d,%.1f,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
-                                           impl, $2, $3, base_m, tail_m, $5, $6, $7, $8, $9,
-                                           base_g, tail_g, rel, drop, $11, $12
-                                }
-                            ' <<< "$tail_line" >> "$TAIL_OUT"
-                        done
-                    done
+
+    run_tail_case() {
+        local BASE_M=$1
+        local K=$2
+        local N=$3
+        local T impl base_line base_gflops D TAIL_M tail_line
+        for T in $THREADS; do
+            if [[ "$SKIP_OVERSUB" != "0" ]] && (( T > AVAILABLE_CORES )); then
+                continue
+            fi
+            for impl in $TAIL_IMPLS; do
+                progress "tail-base impl=$impl M=$BASE_M K=$K N=$N threads=$T"
+                base_line=$(run_bench "$WORKDIR/bench_tail_${impl}" "${impl}_full_base" "$BASE_M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" "$T" "$TAIL_N_ALIGN")
+                base_gflops=$(awk -F, '{print $10}' <<< "$base_line")
+                for D in $TAIL_DELTAS; do
+                    TAIL_M=$((BASE_M + D))
+                    progress "tail impl=$impl base_M=$BASE_M tail_M=$TAIL_M K=$K N=$N threads=$T"
+                    tail_line=$(run_bench "$WORKDIR/bench_tail_${impl}" "${impl}_full_tail" "$TAIL_M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" "$T" "$TAIL_N_ALIGN")
+                    awk -F, -v impl="$impl" -v base_m="$BASE_M" -v tail_m="$TAIL_M" -v base_g="$base_gflops" '
+                        {
+                            tail_g = $10 + 0.0
+                            rel = (base_g > 0.0) ? tail_g * 100.0 / base_g : 0.0
+                            drop = 100.0 - rel
+                            printf "%s,%s,%s,%d,%d,%d,%d,%d,%.1f,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+                                   impl, $2, $3, base_m, tail_m, $5, $6, $7, $8, $9,
+                                   base_g, tail_g, rel, drop, $11, $12
+                        }
+                    ' <<< "$tail_line" >> "$TAIL_OUT"
                 done
             done
         done
-    done
+    }
+
+    if [[ "$CASE_MODE" == "grid" ]]; then
+        for K in $K_VALUES; do
+            for BASE_M in $TAIL_BASE_M_VALUES; do
+                for N in $N_VALUES; do
+                    run_tail_case "$BASE_M" "$K" "$N"
+                done
+            done
+        done
+    else
+        for case in $TAIL_CASES; do
+            IFS=, read -r BASE_M K N <<< "$case"
+            run_tail_case "$BASE_M" "$K" "$N"
+        done
+    fi
     echo "wrote $TAIL_OUT"
 fi
 
