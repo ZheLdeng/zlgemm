@@ -4,8 +4,9 @@ set -euo pipefail
 # Build and run M8 BF16 performance attribution variants.
 #
 # Defaults:
-#   K values: 128 256 512 1024 2048
-#   M/N:      16 32 64 128 256 512 1024
+#   K values: 128 256 512 1024 2048 4096
+#   M values: 16 32 64 128 256 512 1024 2048
+#   N values: 16 32 64 128 256 512 1024 2048 4096 8192
 #   reps:     100
 #   threads:  1
 #
@@ -30,6 +31,7 @@ set -euo pipefail
 #   RUN_TAILS=1 TAIL_BASE_M_VALUES=16 TAIL_DELTAS="1 2 4" ./run_m8_parts.sh
 #   RESULTS_XLSX=/tmp/m8.xlsx ./run_m8_parts.sh
 #   KEEP_CSV=1 OUT=/tmp/m8_parts.csv TAIL_OUT=/tmp/m8_tail.csv ./run_m8_parts.sh
+#   PROGRESS=0 ./run_m8_parts.sh
 
 CC=${CC:-cc}
 ARCH_FLAGS=${ARCH_FLAGS:-"-march=armv8.6-a+sve+bf16"}
@@ -47,9 +49,9 @@ KEEP_CSV=${KEEP_CSV:-0}
 REPS=${REPS:-100}
 WARMUP=${WARMUP:-50}
 RUNS=${RUNS:-7}
-K_VALUES=${K_VALUES:-"128 256 512 1024 2048"}
-M_VALUES=${M_VALUES:-"16 32 64 128 256 512 1024"}
-N_VALUES=${N_VALUES:-"16 32 64 128 256 512 1024"}
+K_VALUES=${K_VALUES:-"128 256 512 1024 2048 4096"}
+M_VALUES=${M_VALUES:-"16 32 64 128 256 512 1024 2048"}
+N_VALUES=${N_VALUES:-"16 32 64 128 256 512 1024 2048 4096 8192"}
 THREADS=${THREADS:-"1"}
 DEFAULT_THREADS=${DEFAULT_THREADS:-"1 2 4 8 10 16 20 32 40 64 80"}
 NPROC=$(nproc 2>/dev/null || echo 64)
@@ -73,6 +75,7 @@ RUN_PARTS=${RUN_PARTS:-1}
 RUN_STORES=${RUN_STORES:-1}
 RUN_BASELINES=${RUN_BASELINES:-1}
 RUN_TAILS=${RUN_TAILS:-1}
+PROGRESS=${PROGRESS:-1}
 
 WORKDIR=${WORKDIR:-"/tmp/m8_parts_${USER}_$$"}
 mkdir -p "$WORKDIR"
@@ -109,6 +112,78 @@ AVAILABLE_CORES=${NCORES:-$(count_cpulist "$CORESET")}
 if [[ "$THREADS" == "auto" ]]; then
     THREADS="$DEFAULT_THREADS"
 fi
+
+count_words() {
+    local n=0
+    local x
+    for x in "$@"; do
+        if [[ -n "$x" ]]; then
+            n=$((n + 1))
+        fi
+    done
+    echo "$n"
+}
+
+thread_allowed() {
+    local t=$1
+    [[ "$SKIP_OVERSUB" == "0" ]] || (( t <= AVAILABLE_CORES ))
+}
+
+active_thread_count() {
+    local n=0
+    local t
+    for t in $THREADS; do
+        if thread_allowed "$t"; then
+            n=$((n + 1))
+        fi
+    done
+    echo "$n"
+}
+
+TOTAL_STEPS=0
+STEP=0
+
+count_total_steps() {
+    local nk nm nn nt nb np ns nsm nti nd nbase
+    nk=$(count_words $K_VALUES)
+    nm=$(count_words $M_VALUES)
+    nn=$(count_words $N_VALUES)
+    nt=$(active_thread_count)
+    nb=0
+    np=0
+    ns=0
+    nsm=0
+    nti=0
+    nd=0
+    nbase=0
+
+    if [[ "$RUN_BASELINES" != "0" ]]; then
+        nb=$(count_words $BASELINE_IMPLS)
+    fi
+    if [[ "$RUN_PARTS" != "0" ]]; then
+        np=$(count_words $PART_VARIANTS)
+    fi
+    if [[ "$RUN_STORES" != "0" ]]; then
+        ns=$(count_words $STORE_IMPLS)
+        nsm=$(count_words $STORE_MODES)
+    fi
+    if [[ "$RUN_TAILS" != "0" ]]; then
+        nbase=$(count_words $TAIL_BASE_M_VALUES)
+        nti=$(count_words $TAIL_IMPLS)
+        nd=$(count_words $TAIL_DELTAS)
+    fi
+
+    TOTAL_STEPS=$((nk * nm * nn * nt * (nb + np + ns * nsm)))
+    TOTAL_STEPS=$((TOTAL_STEPS + nk * nbase * nn * nt * nti * (1 + nd)))
+}
+
+progress() {
+    if [[ "$PROGRESS" == "0" ]]; then
+        return
+    fi
+    STEP=$((STEP + 1))
+    printf '[%d/%d] %s\n' "$STEP" "$TOTAL_STEPS" "$*" >&2
+}
 
 run_bench() {
     local bin=$1
@@ -514,6 +589,8 @@ fi
     echo "# available cores: $AVAILABLE_CORES"
     echo "# threads: $THREADS"
     echo "# OMP_PLACES=$OMP_PLACES OMP_PROC_BIND=$OMP_PROC_BIND"
+    count_total_steps
+    echo "# planned benchmark calls: $TOTAL_STEPS"
 } >&2
 
 echo "variant,mode,cache,M,K,N,threads,KiB,reps,GFLOPS,pct_of_330,pct_of_330xthreads" > "$OUT"
@@ -526,17 +603,20 @@ for K in $K_VALUES; do
                 fi
                 if [[ "$RUN_BASELINES" != "0" ]]; then
                     for impl in $BASELINE_IMPLS; do
+                        progress "parts impl=${impl}_compute_only mode=f32 M=$M K=$K N=$N threads=$T"
                         run_bench "$WORKDIR/bench_${impl}_compute_only" "${impl}_compute_only" "$M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" f32 "$T" >> "$OUT"
                     done
                 fi
                 if [[ "$RUN_PARTS" != "0" ]]; then
                     for variant in $PART_VARIANTS; do
+                        progress "parts variant=sve_${variant} mode=f32 M=$M K=$K N=$N threads=$T"
                         run_bench "$WORKDIR/bench_${variant}" "sve_${variant}" "$M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" f32 "$T" >> "$OUT"
                     done
                 fi
                 if [[ "$RUN_STORES" != "0" ]]; then
                     for impl in $STORE_IMPLS; do
                         for mode in $STORE_MODES; do
+                            progress "parts variant=${impl}_${mode} mode=$mode M=$M K=$K N=$N threads=$T"
                             run_bench "$WORKDIR/bench_store_${impl}" "${impl}_${mode}" "$M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" "$mode" "$T" >> "$OUT"
                         done
                     done
@@ -558,10 +638,12 @@ if [[ "$RUN_TAILS" != "0" ]]; then
                         continue
                     fi
                     for impl in $TAIL_IMPLS; do
+                        progress "tail-base impl=$impl M=$BASE_M K=$K N=$N threads=$T"
                         base_line=$(run_bench "$WORKDIR/bench_tail_${impl}" "${impl}_full_base" "$BASE_M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" "$T" "$TAIL_N_ALIGN")
                         base_gflops=$(awk -F, '{print $10}' <<< "$base_line")
                         for D in $TAIL_DELTAS; do
                             TAIL_M=$((BASE_M + D))
+                            progress "tail impl=$impl base_M=$BASE_M tail_M=$TAIL_M K=$K N=$N threads=$T"
                             tail_line=$(run_bench "$WORKDIR/bench_tail_${impl}" "${impl}_full_tail" "$TAIL_M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" "$T" "$TAIL_N_ALIGN")
                             awk -F, -v impl="$impl" -v base_m="$BASE_M" -v tail_m="$TAIL_M" -v base_g="$base_gflops" '
                                 {
