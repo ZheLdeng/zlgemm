@@ -13,6 +13,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 typedef struct {
     int m;
@@ -107,10 +110,48 @@ static void run_kernel(const char *mode, const uint16_t *A, const uint16_t *B,
     }
 }
 
+static void run_kernel_mt(const char *mode, const uint16_t *A, const uint16_t *B,
+                          float *C_f32, uint16_t *C_bf16, uint16_t *A_reorder,
+                          const gemm_params_t *params, const float *bias,
+                          int threads) {
+    if (threads <= 1) {
+        run_kernel(mode, A, B, C_f32, C_bf16, A_reorder, params, bias);
+        return;
+    }
+
+    int m_blocks = params->m / 8;
+#pragma omp parallel num_threads(threads)
+    {
+#ifdef _OPENMP
+        int tid = omp_get_thread_num();
+        int nth = omp_get_num_threads();
+#else
+        int tid = 0;
+        int nth = 1;
+#endif
+        int block_start = (m_blocks * tid) / nth;
+        int block_end = (m_blocks * (tid + 1)) / nth;
+        int m_start = block_start * 8;
+        int m_count = (block_end - block_start) * 8;
+        if (m_count > 0) {
+            gemm_params_t local = *params;
+            local.m = m_count;
+            run_kernel(mode,
+                       A + (size_t)m_start * (size_t)params->lda,
+                       B,
+                       C_f32 + (size_t)m_start * (size_t)params->ldc,
+                       C_bf16 + (size_t)m_start * (size_t)params->ldc,
+                       A_reorder + (size_t)m_start * (size_t)params->k,
+                       &local,
+                       bias);
+        }
+    }
+}
+
 int main(int argc, char **argv) {
-    if (argc != 8 && argc != 9) {
+    if (argc != 8 && argc != 9 && argc != 10) {
         fprintf(stderr,
-                "usage: %s variant M K N reps warmup runs [f32|bf16|bias]\n",
+                "usage: %s variant M K N reps warmup runs [f32|bf16|bias] [threads]\n",
                 argv[0]);
         return 2;
     }
@@ -122,10 +163,19 @@ int main(int argc, char **argv) {
     int reps = atoi(argv[5]);
     int warmup = atoi(argv[6]);
     int runs = atoi(argv[7]);
-    const char *mode = argc == 9 ? argv[8] : "f32";
+    const char *mode = argc >= 9 ? argv[8] : "f32";
+    int threads = argc == 10 ? atoi(argv[9]) : 1;
     if (strcmp(mode, "f32") != 0 && strcmp(mode, "bf16") != 0 &&
         strcmp(mode, "bias") != 0) {
         fprintf(stderr, "bad mode: %s\n", mode);
+        return 2;
+    }
+    if (threads < 1) {
+        fprintf(stderr, "bad threads: %d\n", threads);
+        return 2;
+    }
+    if (M % 8 != 0) {
+        fprintf(stderr, "M must be a multiple of 8 for this M8 bench: %d\n", M);
         return 2;
     }
 
@@ -149,23 +199,26 @@ int main(int argc, char **argv) {
     gemm_params_t params = {M, K, N, K, K, N};
 
     for (int i = 0; i < warmup; i++)
-        run_kernel(mode, A, B, C_f32, C_bf16, A_reorder, &params, bias);
+        run_kernel_mt(mode, A, B, C_f32, C_bf16, A_reorder, &params, bias,
+                      threads);
 
     double best = 0.0;
     double ops = 2.0 * (double)M * (double)N * (double)K;
     for (int r = 0; r < runs; r++) {
         double t0 = now_sec();
         for (int i = 0; i < reps; i++)
-            run_kernel(mode, A, B, C_f32, C_bf16, A_reorder, &params, bias);
+            run_kernel_mt(mode, A, B, C_f32, C_bf16, A_reorder, &params, bias,
+                          threads);
         double dt = (now_sec() - t0) / (double)reps;
         double gflops = ops / dt / 1e9;
         if (gflops > best)
             best = gflops;
     }
 
-    printf("%s,%s,%s,%d,%d,%d,%.1f,%d,%.2f,%.2f\n",
-           variant, mode, cache_class(kib), M, K, N, kib, reps,
-           best, best * 100.0 / peak_gflops);
+    printf("%s,%s,%s,%d,%d,%d,%d,%.1f,%d,%.2f,%.2f,%.2f\n",
+           variant, mode, cache_class(kib), M, K, N, threads, kib, reps,
+           best, best * 100.0 / peak_gflops,
+           best * 100.0 / (peak_gflops * (double)threads));
 
     free(A);
     free(B);

@@ -117,6 +117,25 @@
 	zip2 \dst2\().2d, \src1\().2d, \src2\().2d
 	.endm
 
+	.macro LOAD_ZERO_MAIN_8
+	movi v9.4s, #0
+	movi v10.4s, #0
+	movi v11.4s, #0
+	movi v12.4s, #0
+	movi v13.4s, #0
+	movi v14.4s, #0
+	movi v15.4s, #0
+	movi v16.4s, #0
+	movi v17.4s, #0
+	movi v18.4s, #0
+	movi v19.4s, #0
+	movi v20.4s, #0
+	movi v21.4s, #0
+	movi v22.4s, #0
+	movi v23.4s, #0
+	movi v24.4s, #0
+	.endm
+
 // ── LOAD_C_ROWMAJOR_B：从 bf16 C 加载 8×8 → blocked v9~v24 ──
 	.macro LOAD_C_ROWMAJOR_B
 	add  x11, C_M_BASE, LDC_B
@@ -619,10 +638,10 @@ _\func_name:
 // ==================== 主入口 (m=8) — GEMM_BODY 宏生成 ====================
 
 // f32 store (m=8)
-GEMM_BODY bf16gemm_k_ld,   8, 8, LOAD_C_ROWMAJOR,   STORE_C_ROWMAJOR,   2, 32
+GEMM_BODY bf16gemm_k_ld,   8, 8, LOAD_ZERO_MAIN_8,  STORE_C_ROWMAJOR,   2, 32
 
 // bf16 store (m=8)
-GEMM_BODY bf16gemm_k_ld_b, 8, 8, LOAD_C_ROWMAJOR_B, STORE_C_ROWMAJOR_B, 1, 16
+GEMM_BODY bf16gemm_k_ld_b, 8, 8, LOAD_ZERO_MAIN_8,  STORE_C_ROWMAJOR_B, 1, 16
 
 // Tail kernels (m=1,2,4) — appended from bf16gemm_k_tail.S
 // Note: INIT/RESTORE macros reused from main kernel above
@@ -1105,16 +1124,16 @@ GEMM_BODY bf16gemm_k_ld_b, 8, 8, LOAD_C_ROWMAJOR_B, STORE_C_ROWMAJOR_B, 1, 16
 
 
 // f32 store
-GEMM_BODY bf16gemm_k_ld1,   1, 2, LOAD_C_1,   STORE_C_1,   2, 32
-GEMM_BODY bf16gemm_k_ld2,   2, 2, LOAD_C_2,   STORE_C_2,   2, 32
-GEMM_BODY bf16gemm_k_ld4,   4, 4, LOAD_C_4,   STORE_C_4,   2, 32
+GEMM_BODY bf16gemm_k_ld1,   1, 2, LOAD_ZERO_1, STORE_C_1,   2, 32
+GEMM_BODY bf16gemm_k_ld2,   2, 2, LOAD_ZERO_2, STORE_C_2,   2, 32
+GEMM_BODY bf16gemm_k_ld4,   4, 4, LOAD_ZERO_4, STORE_C_4,   2, 32
 
 // bf16 store (_b suffix)
-GEMM_BODY bf16gemm_k_ld1_b, 1, 2, LOAD_C_1_B, STORE_C_1_B, 1, 16
-GEMM_BODY bf16gemm_k_ld2_b, 2, 2, LOAD_C_2_B, STORE_C_2_B, 1, 16
-GEMM_BODY bf16gemm_k_ld4_b, 4, 4, LOAD_C_4_B, STORE_C_4_B, 1, 16
+GEMM_BODY bf16gemm_k_ld1_b, 1, 2, LOAD_ZERO_1, STORE_C_1_B, 1, 16
+GEMM_BODY bf16gemm_k_ld2_b, 2, 2, LOAD_ZERO_2, STORE_C_2_B, 1, 16
+GEMM_BODY bf16gemm_k_ld4_b, 4, 4, LOAD_ZERO_4, STORE_C_4_B, 1, 16
 // bf16 store, no C load (_nld_b suffix) — accumulators zero-init
 GEMM_BODY bf16gemm_k_nld_b,  8, 8, LOAD_ZERO_8, STORE_C_ROWMAJOR_B, 1, 16
-GEMM_BODY bf16gemm_k_nld1_b, 1, 2, LOAD_ZERO_2, STORE_C_1_B,        1, 16
+GEMM_BODY bf16gemm_k_nld1_b, 1, 2, LOAD_ZERO_1, STORE_C_1_B,        1, 16
 GEMM_BODY bf16gemm_k_nld2_b, 2, 2, LOAD_ZERO_2, STORE_C_2_B,        1, 16
 GEMM_BODY bf16gemm_k_nld4_b, 4, 4, LOAD_ZERO_4, STORE_C_4_B,        1, 16

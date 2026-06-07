@@ -1,0 +1,38 @@
+CC ?= cc
+ARCH_FLAGS ?= -mcpu=native
+OPT_FLAGS ?= -O3
+CFLAGS ?= $(OPT_FLAGS) -Wall -fopenmp $(ARCH_FLAGS)
+LDLIBS ?= -lm
+
+SVE_KERNELS := bf16gemm_sve.c bf16gemm_sve.S i8gemm_sve.c
+
+.PHONY: all test-sve bench-sve peak-sve mt-sve bench-nld-sve clean-sve
+
+all: test_correctness_sve bench_perf_sve
+
+test_correctness_sve: test_correctness_sve.c $(SVE_KERNELS) bf16gemm.h i8gemm.h gemm_params.h
+	$(CC) $(CFLAGS) -o $@ test_correctness_sve.c $(SVE_KERNELS) $(LDLIBS)
+
+bench_perf_sve: bench_perf_sve.c $(SVE_KERNELS) bf16gemm.h i8gemm.h gemm_params.h
+	$(CC) $(CFLAGS) -o $@ bench_perf_sve.c $(SVE_KERNELS) $(LDLIBS)
+
+bench_nld_sve: bench_nld_sve.c bf16gemm_sve_nld.S
+	$(CC) $(CFLAGS) -o $@ bench_nld_sve.c bf16gemm_sve_nld.S $(LDLIBS)
+
+test-sve: test_correctness_sve
+	./test_correctness_sve
+
+bench-sve: bench_perf_sve
+	./bench_perf_sve $(CSV)
+
+peak-sve: bench_perf_sve
+	./bench_perf_sve --mt-both 8 8 8 1
+
+mt-sve: bench_perf_sve
+	./bench_perf_sve --mt-sweep-both $(M) $(K) $(N)
+
+bench-nld-sve: bench_nld_sve
+	./bench_nld_sve
+
+clean-sve:
+	rm -f test_correctness_sve bench_perf_sve bench_nld_sve
