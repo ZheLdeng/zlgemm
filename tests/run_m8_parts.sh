@@ -59,6 +59,11 @@ NEON_SRC=${NEON_SRC:-"$SCRIPT_DIR/bf16gemm_neon_m8_nld.S"}
 BENCH=${BENCH:-"$SCRIPT_DIR/bench_m8_parts.c"}
 TAIL_BENCH=${TAIL_BENCH:-"$SCRIPT_DIR/bench_full_tail.c"}
 DISPATCH_BENCH=${DISPATCH_BENCH:-"$SCRIPT_DIR/bench_dispatch_types.c"}
+OUT_WAS_SET=${OUT+x}
+TAIL_OUT_WAS_SET=${TAIL_OUT+x}
+STRIDE_OUT_WAS_SET=${STRIDE_OUT+x}
+BATCH_OUT_WAS_SET=${BATCH_OUT+x}
+DISPATCH_OUT_WAS_SET=${DISPATCH_OUT+x}
 OUT=${OUT:-"$RESULTS_DIR/m8_parts_results.csv"}
 TAIL_OUT=${TAIL_OUT:-"$RESULTS_DIR/m8_tail_results.csv"}
 STRIDE_OUT=${STRIDE_OUT:-"$RESULTS_DIR/m8_stride_results.csv"}
@@ -162,6 +167,24 @@ PRUNE_PER_THREAD_BYTES=${PRUNE_PER_THREAD_BYTES:-$((4 * 1024 * 1024))}
 WORKDIR=${WORKDIR:-"/tmp/m8_parts_${USER}_$$"}
 mkdir -p "$WORKDIR"
 trap 'rm -rf "$WORKDIR"' EXIT
+
+if [[ "$KEEP_CSV" == "0" ]]; then
+    if [[ -z "${OUT_WAS_SET:-}" ]]; then
+        OUT="$WORKDIR/m8_parts_results.csv"
+    fi
+    if [[ -z "${TAIL_OUT_WAS_SET:-}" ]]; then
+        TAIL_OUT="$WORKDIR/m8_tail_results.csv"
+    fi
+    if [[ -z "${STRIDE_OUT_WAS_SET:-}" ]]; then
+        STRIDE_OUT="$WORKDIR/m8_stride_results.csv"
+    fi
+    if [[ -z "${BATCH_OUT_WAS_SET:-}" ]]; then
+        BATCH_OUT="$WORKDIR/m8_batch_results.csv"
+    fi
+    if [[ -z "${DISPATCH_OUT_WAS_SET:-}" ]]; then
+        DISPATCH_OUT="$WORKDIR/m8_dispatch_results.csv"
+    fi
+fi
 
 count_cpulist() {
     local list=$1
