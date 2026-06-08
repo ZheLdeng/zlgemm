@@ -34,8 +34,11 @@ set -euo pipefail
 #   RUN_STRIDE=1 STRIDE_FACTORS="1 2" ./run_m8_parts.sh
 #   RUN_BATCH=1 BATCH_COUNTS="1 4 16" ./run_m8_parts.sh
 #   RUN_DISPATCH=1 DISPATCH_IMPLS="sve neon" DISPATCH_DTYPES="bf16 i8" ./run_m8_parts.sh
+#   DISPATCH_SPLITS="auto m n 2d nblock ngroup" ./run_m8_parts.sh
 #   CASE_MODE=lite enables RUN_DISPATCH=1 by default so the workbook includes
 #   public-dispatch performance for the current integrated BF16/I8 paths.
+#   I8 parts attribution is enabled by default through RUN_I8_PARTS=1 and emits
+#   i8_sve_* / i8_neon_* rows for full/prepacked/nostore/noload/compute_only.
 #   M8_PARTS_SPLIT=m|n|auto controls the M8 attribution split policy; default
 #   auto follows the dispatcher-style M/N split heuristic.
 #   RUN_TAILS=1 TAIL_BASE_M_VALUES=16 TAIL_DELTAS="1 2 4" ./run_m8_parts.sh
@@ -47,6 +50,8 @@ set -euo pipefail
 #   CASES="64,512,4096 2048,4096,1024" ./run_m8_parts.sh
 #   PRUNE_BIG_CASE_THREADS=0 ./run_m8_parts.sh
 #   PRUNE_TOTAL_BYTES=$((3*1024*1024)) PRUNE_PER_THREAD_BYTES=$((4*1024*1024)) ./run_m8_parts.sh
+#   PRUNE_SMALL_MT=1 PRUNE_MIN_PER_THREAD_BYTES=$((256*1024)) skips tiny
+#   multi-thread cases whose ABC bytes per requested thread are too small.
 
 CC=${CC:-cc}
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -61,6 +66,7 @@ INCLUDE_FLAGS=${INCLUDE_FLAGS:-"-I$LIB_DIR -I$SCRIPT_DIR"}
 SVE_SRC=${SVE_SRC:-"$SCRIPT_DIR/bf16gemm_sve_m8_nld.S"}
 NEON_SRC=${NEON_SRC:-"$SCRIPT_DIR/bf16gemm_neon_m8_nld.S"}
 BENCH=${BENCH:-"$SCRIPT_DIR/bench_m8_parts.c"}
+I8_BENCH=${I8_BENCH:-"$SCRIPT_DIR/bench_i8_parts.c"}
 TAIL_BENCH=${TAIL_BENCH:-"$SCRIPT_DIR/bench_full_tail.c"}
 DISPATCH_BENCH=${DISPATCH_BENCH:-"$SCRIPT_DIR/bench_dispatch_types.c"}
 OUT_WAS_SET=${OUT+x}
@@ -141,6 +147,8 @@ SKIP_OVERSUB=${SKIP_OVERSUB:-1}
 OMP_PLACES=${OMP_PLACES:-cores}
 OMP_PROC_BIND=${OMP_PROC_BIND:-close}
 PART_VARIANTS=${PART_VARIANTS:-"full prepacked nozero nostore noload nozero_nostore noload_nostore"}
+I8_PART_VARIANTS=${I8_PART_VARIANTS:-"full prepacked nostore noload compute_only"}
+I8_PART_IMPLS=${I8_PART_IMPLS:-"sve neon"}
 STORE_IMPLS=${STORE_IMPLS:-"sve neon"}
 STORE_MODES=${STORE_MODES:-"f32 bf16 bias"}
 STRIDE_IMPLS=${STRIDE_IMPLS:-"sve neon"}
@@ -152,12 +160,14 @@ BATCH_COUNTS=${BATCH_COUNTS:-"1 4 16"}
 DISPATCH_IMPLS=${DISPATCH_IMPLS:-"sve neon"}
 DISPATCH_DTYPES=${DISPATCH_DTYPES:-"bf16 i8"}
 DISPATCH_BATCH_COUNTS=${DISPATCH_BATCH_COUNTS:-"1"}
+DISPATCH_SPLITS=${DISPATCH_SPLITS:-"auto"}
 BASELINE_IMPLS=${BASELINE_IMPLS:-"sve neon"}
 TAIL_IMPLS=${TAIL_IMPLS:-"sve neon"}
 TAIL_BASE_M_VALUES=${TAIL_BASE_M_VALUES:-"$M_VALUES"}
 TAIL_DELTAS=${TAIL_DELTAS:-"1 2 4"}
 TAIL_N_ALIGN=${TAIL_N_ALIGN:-0}
 RUN_PARTS=${RUN_PARTS:-1}
+RUN_I8_PARTS=${RUN_I8_PARTS:-1}
 RUN_STORES=${RUN_STORES:-1}
 RUN_BASELINES=${RUN_BASELINES:-1}
 RUN_TAILS=${RUN_TAILS:-1}
@@ -168,6 +178,8 @@ PROGRESS=${PROGRESS:-1}
 PRUNE_BIG_CASE_THREADS=${PRUNE_BIG_CASE_THREADS:-1}
 PRUNE_TOTAL_BYTES=${PRUNE_TOTAL_BYTES:-$((3 * 1024 * 1024))}
 PRUNE_PER_THREAD_BYTES=${PRUNE_PER_THREAD_BYTES:-$((4 * 1024 * 1024))}
+PRUNE_SMALL_MT=${PRUNE_SMALL_MT:-1}
+PRUNE_MIN_PER_THREAD_BYTES=${PRUNE_MIN_PER_THREAD_BYTES:-$((256 * 1024))}
 
 WORKDIR=${WORKDIR:-"/tmp/m8_parts_${USER}_$$"}
 mkdir -p "$WORKDIR"
@@ -255,10 +267,18 @@ case_thread_allowed() {
 
     thread_allowed "$T" || return 1
     if [[ "$PRUNE_BIG_CASE_THREADS" == "0" ]]; then
-        return 0
+        if [[ "$PRUNE_SMALL_MT" == "0" || "$T" -le 1 ]]; then
+            return 0
+        fi
+        bytes=$(abc_bytes "$M" "$K" "$N")
+        (( (bytes + T - 1) / T >= PRUNE_MIN_PER_THREAD_BYTES ))
+        return
     fi
 
     bytes=$(abc_bytes "$M" "$K" "$N")
+    if [[ "$PRUNE_SMALL_MT" != "0" && "$T" -gt 1 ]]; then
+        (( (bytes + T - 1) / T >= PRUNE_MIN_PER_THREAD_BYTES )) || return 1
+    fi
     if (( bytes <= PRUNE_TOTAL_BYTES )); then
         return 0
     fi
@@ -307,10 +327,11 @@ TOTAL_STEPS=0
 STEP=0
 
 count_total_steps() {
-    local nc nb np ns nsm nti nd nsi nsim nsf nbti nbc ndi ndt ndbc
+    local nc nb np nip ns nsm nti nd nsi nsim nsf nbti nbc ndi ndt nds ndbc
     nc=$(case_count)
     nb=0
     np=0
+    nip=0
     ns=0
     nsm=0
     nti=0
@@ -328,6 +349,9 @@ count_total_steps() {
     fi
     if [[ "$RUN_PARTS" != "0" ]]; then
         np=$(count_words $PART_VARIANTS)
+    fi
+    if [[ "$RUN_I8_PARTS" != "0" ]]; then
+        nip=$(($(count_words $I8_PART_IMPLS) * $(count_words $I8_PART_VARIANTS)))
     fi
     if [[ "$RUN_STORES" != "0" ]]; then
         ns=$(count_words $STORE_IMPLS)
@@ -347,13 +371,22 @@ count_total_steps() {
         nbc=$(count_words $BATCH_COUNTS)
     fi
     if [[ "$RUN_DISPATCH" != "0" ]]; then
-        ndi=$(count_words $DISPATCH_IMPLS)
-        ndt=$(count_words $DISPATCH_DTYPES)
+        local impl dtype split
+        ndi=0
+        for impl in $DISPATCH_IMPLS; do
+            for dtype in $DISPATCH_DTYPES; do
+                for split in $DISPATCH_SPLITS; do
+                    if split_supported "$impl" "$dtype" "$split"; then
+                        ndi=$((ndi + 1))
+                    fi
+                done
+            done
+        done
         ndbc=$(count_words $DISPATCH_BATCH_COUNTS)
     fi
 
-    local per_case_parts=$((nb + np + ns * nsm))
-    local per_case_extra=$((nsi * nsim * nsf + nbti * nbc + ndi * ndt * ndbc))
+    local per_case_parts=$((nb + np + nip + ns * nsm))
+    local per_case_extra=$((nsi * nsim * nsf + nbti * nbc + ndi * ndbc))
     local per_tail_impl=$((1 + nd))
     local t M K N case base_M tail_m max_d
     TOTAL_STEPS=0
@@ -425,6 +458,52 @@ run_bench() {
         OMP_PLACES="$OMP_PLACES" OMP_PROC_BIND="$OMP_PROC_BIND" taskset -c "$CORESET" "$bin" "$@"
     else
         OMP_PLACES="$OMP_PLACES" OMP_PROC_BIND="$OMP_PROC_BIND" "$bin" "$@"
+    fi
+}
+
+split_supported() {
+    local impl=$1
+    local dtype=$2
+    local split=$3
+    case "$split" in
+        auto|m|n) return 0 ;;
+        2d|nblock|ngroup)
+            [[ "$impl" == "sve" && "$dtype" == "bf16" ]]
+            return
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+run_dispatch_bench() {
+    local impl=$1
+    local dtype=$2
+    local split=$3
+    local bin=$4
+    shift 4
+    local env_args=()
+
+    case "${impl}_${dtype}" in
+        sve_bf16)
+            if [[ "$split" == "auto" ]]; then env_args+=(-u BF16_SVE_SPLIT); else env_args+=(BF16_SVE_SPLIT="$split"); fi
+            ;;
+        neon_bf16)
+            if [[ "$split" == "auto" ]]; then env_args+=(-u BF16_NEON_SPLIT); else env_args+=(BF16_NEON_SPLIT="$split"); fi
+            ;;
+        sve_i8)
+            if [[ "$split" == "auto" ]]; then env_args+=(-u I8_SVE_SPLIT); else env_args+=(I8_SVE_SPLIT="$split"); fi
+            ;;
+        neon_i8)
+            if [[ "$split" == "auto" ]]; then env_args+=(-u I8_GEMM_SPLIT); else env_args+=(I8_GEMM_SPLIT="$split"); fi
+            ;;
+    esac
+
+    if [[ -n "$CORESET" ]]; then
+        env "${env_args[@]}" OMP_PLACES="$OMP_PLACES" OMP_PROC_BIND="$OMP_PROC_BIND" \
+            taskset -c "$CORESET" "$bin" "$@"
+    else
+        env "${env_args[@]}" OMP_PLACES="$OMP_PLACES" OMP_PROC_BIND="$OMP_PROC_BIND" \
+            "$bin" "$@"
     fi
 }
 
@@ -605,6 +684,207 @@ build_variant() {
     generate_variant "$variant" "$src_s"
     "$CC" $OPT_FLAGS $ARCH_FLAGS $INCLUDE_FLAGS -c "$src_s" -o "$obj"
     "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS "$BENCH" "$obj" -o "$bin"
+}
+
+generate_i8_sve_variant() {
+    local variant=$1
+    local out_s=$2
+    python3 - "$LIB_DIR/i8gemm_sve.S" "$variant" "$out_s" <<'PY'
+import sys
+
+src, variant, out_s = sys.argv[1], sys.argv[2], sys.argv[3]
+lines = open(src, "r", encoding="utf-8").read().splitlines()
+flags = {
+    "full": set(),
+    "prepacked": set(),
+    "nostore": {"no_store"},
+    "noload": {"no_ab_load", "init_ab"},
+    "compute_only": {"no_store", "no_c_load", "no_ab_load", "no_zero", "init_ab"},
+}[variant]
+
+init_ab = [
+    "\tmov z0.b, #1",
+    "\tmov z4.b, #1",
+    "\tmov z5.b, #1",
+    "\tmov z6.b, #1",
+    "\tmov z7.b, #1",
+]
+
+out = []
+for line in lines:
+    stripped = line.strip()
+    if "no_zero" in flags and stripped == "ZERO_ACC":
+        out.append("//" + line)
+        continue
+    if "no_c_load" in flags and stripped.startswith("LOAD_C_ROW "):
+        out.append("//" + line)
+        continue
+    if "no_store" in flags and stripped.startswith("STORE_ROW "):
+        out.append("//" + line)
+        continue
+    if "no_ab_load" in flags:
+        if stripped.startswith("ld1b z4.b") or stripped.startswith("ld1b z5.b"):
+            out.append("//" + line)
+            continue
+        if stripped.startswith("ld1b z6.b") or stripped.startswith("ld1b z7.b"):
+            out.append("//" + line)
+            continue
+        if stripped.startswith("LOAD_A_PAIR "):
+            out.append("//" + line)
+            continue
+    out.append(line)
+    if "init_ab" in flags and stripped == "ptrue p1.s":
+        out.extend(init_ab)
+
+open(out_s, "w", encoding="utf-8").write("\n".join(out) + "\n")
+PY
+}
+
+generate_i8_neon_variant() {
+    local variant=$1
+    local out_s=$2
+    python3 - "$LIB_DIR/i8gemm_k.S" "$variant" "$out_s" <<'PY'
+import sys
+
+src, variant, out_s = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(src, "r", encoding="utf-8").read()
+flags = {
+    "full": set(),
+    "prepacked": {"prepacked"},
+    "nostore": {"no_store"},
+    "noload": {"prepacked", "no_ab_load", "init_ab"},
+    "compute_only": {"prepacked", "no_ab_load", "no_store", "no_c_load", "init_ab"},
+}[variant]
+
+if "prepacked" in flags:
+    text = text.replace("mov  FIRST_N, #1", "mov  FIRST_N, #0")
+
+hook = """
+// -- generated I8 NEON attribution overrides --
+"""
+if "init_ab" in flags:
+    hook += """
+\t.purgem INIT
+\t.macro INIT
+\tstp x19, x20, [sp, #-16]!
+\tstp x21, x22, [sp, #-16]!
+\tstp x23, x24, [sp, #-16]!
+\tstp x25, x26, [sp, #-16]!
+\tstp x27, x28, [sp, #-16]!
+\tstp x29, x30, [sp, #-16]!
+\tstp d8,  d9,  [sp, #-16]!
+\tstp d10, d11, [sp, #-16]!
+\tstp d12, d13, [sp, #-16]!
+\tstp d14, d15, [sp, #-16]!
+\tmovi v0.16b, #1
+\tmovi v1.16b, #1
+\tmovi v2.16b, #1
+\tmovi v3.16b, #1
+\tmovi v4.16b, #1
+\tmovi v5.16b, #1
+\tmovi v6.16b, #1
+\tmovi v7.16b, #1
+\tmovi v8.16b, #1
+\tmovi v25.16b, #1
+\tmovi v26.16b, #1
+\tmovi v27.16b, #1
+\tmovi v28.16b, #1
+\tmovi v29.16b, #1
+\tmovi v30.16b, #1
+\tmovi v31.16b, #1
+\t.endm
+"""
+if "no_c_load" in flags:
+    hook += """
+\t.purgem LOAD_C_ROWMAJOR
+\t.macro LOAD_C_ROWMAJOR
+\t.endm
+"""
+if "no_store" in flags:
+    hook += """
+\t.purgem STORE_C_ROWMAJOR
+\t.macro STORE_C_ROWMAJOR
+\t.endm
+"""
+if "no_ab_load" in flags:
+    hook += r"""
+	.purgem LOAD_A0_B0_8
+	.purgem COMPUTE_A1_B1_8
+	.purgem COMPUTE_A2_B2_8
+	.purgem COMPUTE_A3_B3_8
+	.macro LOAD_A0_B0_8
+	.endm
+	.macro COMPUTE_A1_B1_8
+	smmla v9.4s,  v0.16b, v4.16b
+	smmla v10.4s, v0.16b, v5.16b
+	smmla v11.4s, v0.16b, v6.16b
+	smmla v12.4s, v0.16b, v7.16b
+	smmla v13.4s, v1.16b, v4.16b
+	smmla v14.4s, v1.16b, v5.16b
+	smmla v15.4s, v1.16b, v6.16b
+	smmla v16.4s, v1.16b, v7.16b
+	smmla v17.4s, v2.16b, v4.16b
+	smmla v18.4s, v2.16b, v5.16b
+	smmla v19.4s, v2.16b, v6.16b
+	smmla v20.4s, v2.16b, v7.16b
+	smmla v21.4s, v3.16b, v4.16b
+	smmla v22.4s, v3.16b, v5.16b
+	smmla v23.4s, v3.16b, v6.16b
+	smmla v24.4s, v3.16b, v7.16b
+	.endm
+	.macro COMPUTE_A2_B2_8
+	smmla v9.4s,  v8.16b, v28.16b
+	smmla v10.4s, v8.16b, v29.16b
+	smmla v11.4s, v8.16b, v30.16b
+	smmla v12.4s, v8.16b, v31.16b
+	smmla v13.4s, v25.16b, v28.16b
+	smmla v14.4s, v25.16b, v29.16b
+	smmla v15.4s, v25.16b, v30.16b
+	smmla v16.4s, v25.16b, v31.16b
+	smmla v17.4s, v26.16b, v28.16b
+	smmla v18.4s, v26.16b, v29.16b
+	smmla v19.4s, v26.16b, v30.16b
+	smmla v20.4s, v26.16b, v31.16b
+	smmla v21.4s, v27.16b, v28.16b
+	smmla v22.4s, v27.16b, v29.16b
+	smmla v23.4s, v27.16b, v30.16b
+	smmla v24.4s, v27.16b, v31.16b
+	.endm
+	.macro COMPUTE_A3_B3_8
+	COMPUTE_A2_B2_8
+	.endm
+"""
+
+marker = "// ════════════════════════════════════════════════════════════════════\n// 四个函数实例化"
+text = text.replace(marker, hook + "\n" + marker)
+open(out_s, "w", encoding="utf-8").write(text)
+PY
+}
+
+build_i8_variant() {
+    local impl=$1
+    local variant=$2
+    local label="i8_${impl}_${variant}"
+    local src_s="$WORKDIR/${label}.S"
+    local obj="$WORKDIR/${label}.o"
+    local bin="$WORKDIR/bench_${label}"
+    local bench_flags=()
+
+    case "$impl" in
+        sve)
+            generate_i8_sve_variant "$variant" "$src_s"
+            bench_flags=(-DI8_BENCH_SVE_PACK=1)
+            ;;
+        neon)
+            generate_i8_neon_variant "$variant" "$src_s"
+            bench_flags=(-DI8_BENCH_NTILE=8)
+            ;;
+        *) echo "unknown i8 parts impl: $impl" >&2; exit 2 ;;
+    esac
+
+    "$CC" $OPT_FLAGS $ARCH_FLAGS $INCLUDE_FLAGS -c "$src_s" -o "$obj"
+    "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS "${bench_flags[@]}" \
+        "$I8_BENCH" "$obj" -o "$bin"
 }
 
 build_source() {
@@ -837,6 +1117,14 @@ if [[ "$RUN_PARTS" != "0" ]]; then
     done
 fi
 
+if [[ "$RUN_I8_PARTS" != "0" ]]; then
+    for impl in $I8_PART_IMPLS; do
+        for variant in $I8_PART_VARIANTS; do
+            build_i8_variant "$impl" "$variant"
+        done
+    done
+fi
+
 if [[ "$RUN_BASELINES" != "0" ]]; then
     for impl in $BASELINE_IMPLS; do
         build_baseline "$impl"
@@ -899,6 +1187,11 @@ fi
     else
         echo "# prune big-case threads: disabled"
     fi
+    if [[ "$PRUNE_SMALL_MT" != "0" ]]; then
+        echo "# prune small multi-thread cases: threads>1 requires ceil(ABC/threads)>=${PRUNE_MIN_PER_THREAD_BYTES} bytes"
+    else
+        echo "# prune small multi-thread cases: disabled"
+    fi
     echo "# OMP_PLACES=$OMP_PLACES OMP_PROC_BIND=$OMP_PROC_BIND"
     count_total_steps
     echo "# planned benchmark calls: $TOTAL_STEPS"
@@ -925,6 +1218,15 @@ run_parts_case() {
             for variant in $PART_VARIANTS; do
                 progress "parts variant=sve_${variant} mode=f32 M=$M K=$K N=$N threads=$T"
                 run_bench "$WORKDIR/bench_${variant}" "sve_${variant}" "$M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" f32 "$T" >> "$OUT"
+            done
+        fi
+        if [[ "$RUN_I8_PARTS" != "0" ]]; then
+            for impl in $I8_PART_IMPLS; do
+                for variant in $I8_PART_VARIANTS; do
+                    progress "parts variant=i8_${impl}_${variant} mode=i32 M=$M K=$K N=$N threads=$T"
+                    run_bench "$WORKDIR/bench_i8_${impl}_${variant}" "i8_${impl}_${variant}" \
+                        "$M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" i32 "$T" >> "$OUT"
+                done
             done
         fi
         if [[ "$RUN_STORES" != "0" ]]; then
@@ -1038,23 +1340,31 @@ if [[ "$RUN_BATCH" != "0" ]]; then
 fi
 
 if [[ "$RUN_DISPATCH" != "0" ]]; then
-    echo "impl,dtype,cache,M,K,N,threads,batch_count,KiB,reps,perf,pct_of_baseline,pct_of_baseline_xthreads" > "$DISPATCH_OUT"
+    echo "impl,dtype,split,cache,M,K,N,threads,batch_count,KiB,reps,perf,pct_of_baseline,pct_of_baseline_xthreads" > "$DISPATCH_OUT"
 
     run_dispatch_case() {
         local M=$1
         local K=$2
         local N=$3
-        local T impl dtype bc
+        local T impl dtype split bc line
         for T in $THREADS; do
             if ! case_thread_allowed "$M" "$K" "$N" "$T"; then
                 continue
             fi
             for impl in $DISPATCH_IMPLS; do
                 for dtype in $DISPATCH_DTYPES; do
-                    for bc in $DISPATCH_BATCH_COUNTS; do
-                        progress "dispatch impl=$impl dtype=$dtype batch=$bc M=$M K=$K N=$N threads=$T"
-                        run_bench "$WORKDIR/bench_dispatch_${impl}" "$impl" "$dtype" \
-                            "$M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" "$T" "$bc" >> "$DISPATCH_OUT"
+                    for split in $DISPATCH_SPLITS; do
+                        if ! split_supported "$impl" "$dtype" "$split"; then
+                            continue
+                        fi
+                        for bc in $DISPATCH_BATCH_COUNTS; do
+                            progress "dispatch impl=$impl dtype=$dtype split=$split batch=$bc M=$M K=$K N=$N threads=$T"
+                            line=$(run_dispatch_bench "$impl" "$dtype" "$split" \
+                                "$WORKDIR/bench_dispatch_${impl}" "$impl" "$dtype" \
+                                "$M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" "$T" "$bc")
+                            awk -F, -v split_name="$split" 'BEGIN{OFS=","} {print $1,$2,split_name,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13}' \
+                                <<< "$line" >> "$DISPATCH_OUT"
+                        done
                     done
                 done
             done
