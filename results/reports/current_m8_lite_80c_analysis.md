@@ -2,7 +2,7 @@
 
 ## 1. 测试范围
 
-本报告只分析 `results/m8/current_m8_lite_80c.xlsx`。
+本报告只分析 `results/m8/current_m8_lite_80c.xlsx`。注意：这份 xlsx 是脚本调整前生成的旧数据；当时 `parts` sheet 还是 M-only 切分。脚本已经更新为 `CASE_MODE=lite` 默认打开 `dispatch`，并且 `parts` attribution 默认使用 dispatcher-style auto M/N split。后续重跑同名命令后，需要基于新 xlsx 刷新本报告。
 
 这次 xlsx 里包含两个 sheet：
 
@@ -17,7 +17,7 @@ CASE_MODE=lite THREADS=auto c=80-159 RESULTS_XLSX=../results/m8/current_m8_lite_
 
 本次文件没有 `stride`、`batch`、`dispatch` sheet，所以不分析 stride、多 GEMM batch、I8 dispatch。注意：这是这份 xlsx 生成时的状态；脚本已调整为 `CASE_MODE=lite` 默认打开 `RUN_DISPATCH=1`，后续重跑同样命令会多出 `dispatch` sheet，用来观察当前完整 BF16/I8 public dispatcher 的最优路径。
 
-一个关键前提：这份报告里的 `parts` 不是完整对外 dispatcher 的测试，而是裸 M8 kernel attribution benchmark。`bench_m8_parts.c` 的多线程只按 M 方向切分，工作单元是 `M/8` 个 M8 block，不切 N。因此当线程数大于 `M/8`，或者 `M/8` 不能较均匀分给线程时，即使 compute-only 也会掉速。
+一个关键前提：这份旧报告里的 `parts` 不是完整对外 dispatcher 的测试，而是裸 M8 kernel attribution benchmark。旧数据生成时 `bench_m8_parts.c` 的多线程只按 M 方向切分，工作单元是 `M/8` 个 M8 block，不切 N。因此当线程数大于 `M/8`，或者 `M/8` 不能较均匀分给线程时，即使 compute-only 也会掉速。
 
 完整 SVE BF16 对外接口在 `lib/bf16gemm_sve.c` 里仍然有按 N 切的策略：`bf16_use_n_split()` 会在 `M/8 < threads`、或者 B panel 足够大且 `N >= 2M` 时选择 N split，也可以通过 `BF16_SVE_SPLIT=n` 强制指定。本报告不能直接用来否定 N split，只能说明当前裸 M8 parts benchmark 的 M-only 切分限制。
 

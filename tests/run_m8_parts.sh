@@ -36,6 +36,8 @@ set -euo pipefail
 #   RUN_DISPATCH=1 DISPATCH_IMPLS="sve neon" DISPATCH_DTYPES="bf16 i8" ./run_m8_parts.sh
 #   CASE_MODE=lite enables RUN_DISPATCH=1 by default so the workbook includes
 #   public-dispatch performance for the current integrated BF16/I8 paths.
+#   M8_PARTS_SPLIT=m|n|auto controls the M8 attribution split policy; default
+#   auto follows the dispatcher-style M/N split heuristic.
 #   RUN_TAILS=1 TAIL_BASE_M_VALUES=16 TAIL_DELTAS="1 2 4" ./run_m8_parts.sh
 #   RESULTS_XLSX=/tmp/m8.xlsx ./run_m8_parts.sh
 #   KEEP_CSV=1 OUT=/tmp/m8_parts.csv TAIL_OUT=/tmp/m8_tail.csv ./run_m8_parts.sh
@@ -610,8 +612,12 @@ build_source() {
     local src=$2
     local obj="$WORKDIR/${label}.o"
     local bin="$WORKDIR/bench_${label}"
+    local bench_flags=()
+    if [[ "$label" == *neon* ]]; then
+        bench_flags=(-DM8_BENCH_NTILE=8)
+    fi
     "$CC" $OPT_FLAGS $ARCH_FLAGS $INCLUDE_FLAGS -c "$src" -o "$obj"
-    "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS "$BENCH" "$obj" -o "$bin"
+    "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS "${bench_flags[@]}" "$BENCH" "$obj" -o "$bin"
 }
 
 generate_neon_compute_only() {
@@ -765,7 +771,7 @@ build_neon_compute_only() {
     local bin="$WORKDIR/bench_neon_compute_only"
     generate_neon_compute_only "$src_s"
     "$CC" $OPT_FLAGS $ARCH_FLAGS $INCLUDE_FLAGS -c "$src_s" -o "$obj"
-    "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS "$BENCH" "$obj" -o "$bin"
+    "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS -DM8_BENCH_NTILE=8 "$BENCH" "$obj" -o "$bin"
 }
 
 build_baseline() {

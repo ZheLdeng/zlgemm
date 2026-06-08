@@ -17,6 +17,10 @@
 #include <omp.h>
 #endif
 
+#ifndef M8_BENCH_NTILE
+#define M8_BENCH_NTILE 0
+#endif
+
 typedef struct {
     int m;
     int k;
@@ -98,6 +102,41 @@ static int mode_is_bias(const char *mode) {
     return strcmp(mode, "bias") == 0;
 }
 
+static int m8_bench_n_tile(void) {
+#if M8_BENCH_NTILE > 0
+    return M8_BENCH_NTILE;
+#else
+    return (int)(svcntb() / 2);
+#endif
+}
+
+static int use_n_split_for_shape(int M, int K, int N, int threads) {
+    if (threads <= 1)
+        return 0;
+
+    const char *split = getenv("M8_PARTS_SPLIT");
+    int n_tile = m8_bench_n_tile();
+    int n_tiles = N / n_tile;
+    int m_blocks = M / 8;
+
+    if (split) {
+        if (strcmp(split, "m") == 0)
+            return 0;
+        if (strcmp(split, "n") == 0)
+            return n_tiles >= threads;
+        if (strcmp(split, "auto") != 0)
+            return 0;
+    }
+
+    if (n_tiles < threads)
+        return 0;
+    if (m_blocks < threads)
+        return 1;
+
+    size_t b_panel_bytes = (size_t)K * (size_t)N * sizeof(uint16_t);
+    return b_panel_bytes >= 512u * 1024u && N >= M * 2;
+}
+
 static void run_kernel(const char *mode, const uint16_t *A, const uint16_t *B,
                        float *C_f32, uint16_t *C_bf16, uint16_t *A_reorder,
                        const gemm_params_t *params, const float *bias) {
@@ -116,6 +155,32 @@ static void run_kernel_mt(const char *mode, const uint16_t *A, const uint16_t *B
                           int threads) {
     if (threads <= 1) {
         run_kernel(mode, A, B, C_f32, C_bf16, A_reorder, params, bias);
+        return;
+    }
+
+    if (use_n_split_for_shape(params->m, params->k, params->n, threads)) {
+        int n_tile = m8_bench_n_tile();
+        int n_tiles = params->n / n_tile;
+#pragma omp parallel for num_threads(threads) schedule(static)
+        for (int t = 0; t < n_tiles; t++) {
+            int n0 = t * n_tile;
+#ifdef _OPENMP
+            int tid = omp_get_thread_num();
+#else
+            int tid = 0;
+#endif
+            size_t reorder_stride = (size_t)params->m * (size_t)params->k;
+            gemm_params_t local = *params;
+            local.n = n_tile;
+            run_kernel(mode,
+                       A,
+                       B + (size_t)t * (size_t)params->k * (size_t)n_tile,
+                       C_f32 + n0,
+                       C_bf16 + n0,
+                       A_reorder + (size_t)tid * reorder_stride,
+                       &local,
+                       bias + n0);
+        }
         return;
     }
 
@@ -201,21 +266,29 @@ int main(int argc, char **argv) {
     size_t c_bytes = c_elems *
                      (mode_is_bf16(mode) ? sizeof(uint16_t) : sizeof(float));
     size_t bias_bytes = mode_is_bias(mode) ? (size_t)N * sizeof(float) : 0;
+    size_t reorder_copies = (size_t)threads;
+    if (reorder_copies < 1)
+        reorder_copies = 1;
+    size_t reorder_elems = (size_t)M * (size_t)K * reorder_copies;
     size_t one_batch_bytes = a_bytes + b_bytes + c_bytes + bias_bytes;
     double kib = (double)one_batch_bytes * (double)batch_count / 1024.0;
 
     uint16_t *A = (uint16_t *)xalloc(a_bytes * (size_t)batch_count);
     uint16_t *B = (uint16_t *)xalloc(b_bytes * (size_t)batch_count);
-    uint16_t *A_reorder = (uint16_t *)xalloc((size_t)M * (size_t)K *
+    uint16_t *A_reorder = (uint16_t *)xalloc(reorder_elems *
                                              sizeof(uint16_t) * (size_t)batch_count);
     float *C_f32 = (float *)xalloc(c_elems * sizeof(float) * (size_t)batch_count);
     uint16_t *C_bf16 = (uint16_t *)xalloc(c_elems * sizeof(uint16_t) *
                                           (size_t)batch_count);
     float *bias = (float *)xalloc((size_t)N * sizeof(float));
 
-    for (int b = 0; b < batch_count; b++)
-        pack_a8(A + (size_t)b * a_elems,
-                A_reorder + (size_t)b * (size_t)M * (size_t)K, M, K, lda);
+    for (int b = 0; b < batch_count; b++) {
+        uint16_t *batch_reorder = A_reorder + (size_t)b * reorder_elems;
+        for (size_t copy = 0; copy < reorder_copies; copy++)
+            pack_a8(A + (size_t)b * a_elems,
+                    batch_reorder + copy * (size_t)M * (size_t)K,
+                    M, K, lda);
+    }
     fill_bias(bias, N);
     gemm_params_t params = {M, K, N, lda, ldb, ldc};
 
@@ -226,7 +299,7 @@ int main(int argc, char **argv) {
                           B + (size_t)b * b_elems,
                           C_f32 + (size_t)b * c_elems,
                           C_bf16 + (size_t)b * c_elems,
-                          A_reorder + (size_t)b * (size_t)M * (size_t)K,
+                          A_reorder + (size_t)b * reorder_elems,
                           &params, bias, threads);
         }
     }
@@ -242,7 +315,7 @@ int main(int argc, char **argv) {
                               B + (size_t)b * b_elems,
                               C_f32 + (size_t)b * c_elems,
                               C_bf16 + (size_t)b * c_elems,
-                              A_reorder + (size_t)b * (size_t)M * (size_t)K,
+                              A_reorder + (size_t)b * reorder_elems,
                               &params, bias, threads);
             }
         }
