@@ -786,7 +786,8 @@ build_tail_full() {
         sve)
             "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS "$TAIL_BENCH" \
                 "$LIB_DIR/bf16gemm_sve.c" "$LIB_DIR/bf16gemm_sve.S" \
-                "$LIB_DIR/i8gemm_sve.c" -o "$bin" -lm
+                "$LIB_DIR/i8gemm_sve.c" "$LIB_DIR/i8gemm_sve.S" \
+                -o "$bin" -lm
             ;;
         neon)
             "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS "$TAIL_BENCH" \
