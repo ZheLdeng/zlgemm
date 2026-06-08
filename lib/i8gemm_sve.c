@@ -37,6 +37,52 @@ static int round_up_int(int x, int q) {
     return ((x + q - 1) / q) * q;
 }
 
+static int i8_sve_effective_threads(int num_threads, int M, int n_tiles) {
+    if (num_threads <= 0)
+        num_threads = omp_get_max_threads();
+    if (num_threads <= 0)
+        num_threads = 1;
+
+    const char *clamp_env = getenv("I8_SVE_CLAMP_THREADS");
+    int clamp_threads = clamp_env ? atoi(clamp_env) != 0 : 1;
+    if (!clamp_threads)
+        return num_threads;
+
+    int work_units = ((M + 7) / 8) * n_tiles;
+    if (work_units < 1)
+        work_units = 1;
+    if (num_threads > work_units)
+        num_threads = work_units;
+
+    if (M < 64 && n_tiles < num_threads * 4) {
+        int by_n = (n_tiles + 3) / 4;
+        if (by_n < 1)
+            by_n = 1;
+        if (num_threads > by_n)
+            num_threads = by_n;
+    }
+    return num_threads;
+}
+
+static int i8_sve_use_n_split(int M, int K_r, int N_r, int n_tiles,
+                              int num_threads) {
+    const char *split = getenv("I8_SVE_SPLIT");
+    if (split) {
+        if (strcmp(split, "m") == 0)
+            return 0;
+        if (strcmp(split, "n") == 0)
+            return n_tiles >= num_threads;
+    }
+
+    if (num_threads <= 1 || n_tiles < num_threads)
+        return 0;
+    if (M / 8 < num_threads)
+        return 1;
+
+    const size_t b_panel_bytes = (size_t)K_r * (size_t)N_r * sizeof(i8_t);
+    return b_panel_bytes >= 512u * 1024u && N_r >= M * 2;
+}
+
 void i8_pack_B(const i8_t *B, i8_t *B_reo, int K, int N) {
     const int segs = i8_sve_segments();
     const int n_tile = segs * 8;
@@ -304,14 +350,13 @@ static void i8_dispatch_f32(const i8_t *A, const i8_t *B_reo, f32_t *C,
 void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
                         i32_t *C, int M, int K_r, int N_r,
                         int num_threads) {
-    if (num_threads <= 0)
-        num_threads = omp_get_max_threads();
-    if (num_threads <= 0)
-        num_threads = 1;
     const int n_tile = i8_sve_n_tile();
     const int n_tiles = N_r / n_tile;
+    num_threads = i8_sve_effective_threads(num_threads, M, n_tiles);
+    const int use_n_split =
+        i8_sve_use_n_split(M, K_r, N_r, n_tiles, num_threads);
 
-    if (M / 8 >= num_threads || n_tiles < num_threads) {
+    if (!use_n_split) {
         #pragma omp parallel for num_threads(num_threads) schedule(static)
         for (int m0 = 0; m0 < M; m0 += 8) {
             int mb = M - m0 < 8 ? M - m0 : 8;
@@ -331,14 +376,13 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
 void i8gemm_mt_dispatch_f(const i8_t *A, const i8_t *B_reo,
                           f32_t *C, int M, int K_r, int N_r,
                           int num_threads) {
-    if (num_threads <= 0)
-        num_threads = omp_get_max_threads();
-    if (num_threads <= 0)
-        num_threads = 1;
     const int n_tile = i8_sve_n_tile();
     const int n_tiles = N_r / n_tile;
+    num_threads = i8_sve_effective_threads(num_threads, M, n_tiles);
+    const int use_n_split =
+        i8_sve_use_n_split(M, K_r, N_r, n_tiles, num_threads);
 
-    if (M / 8 >= num_threads || n_tiles < num_threads) {
+    if (!use_n_split) {
         #pragma omp parallel for num_threads(num_threads) schedule(static)
         for (int m0 = 0; m0 < M; m0 += 8) {
             int mb = M - m0 < 8 ? M - m0 : 8;
@@ -358,14 +402,13 @@ void i8gemm_mt_dispatch_f(const i8_t *A, const i8_t *B_reo,
 void i8gemm_mt_dispatch_bias_f(const i8_t *A, const i8_t *B_reo,
                                f32_t *C, int M, int K_r, int N_r,
                                int num_threads, const f32_t *bias) {
-    if (num_threads <= 0)
-        num_threads = omp_get_max_threads();
-    if (num_threads <= 0)
-        num_threads = 1;
     const int n_tile = i8_sve_n_tile();
     const int n_tiles = N_r / n_tile;
+    num_threads = i8_sve_effective_threads(num_threads, M, n_tiles);
+    const int use_n_split =
+        i8_sve_use_n_split(M, K_r, N_r, n_tiles, num_threads);
 
-    if (M / 8 >= num_threads || n_tiles < num_threads) {
+    if (!use_n_split) {
         #pragma omp parallel for num_threads(num_threads) schedule(static)
         for (int m0 = 0; m0 < M; m0 += 8) {
             int mb = M - m0 < 8 ? M - m0 : 8;

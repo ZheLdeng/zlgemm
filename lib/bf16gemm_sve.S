@@ -101,7 +101,22 @@
 	.endm
 
 	.macro LOAD_C_ALL_F32
+	cbnz x30, 901\@f
+	cbnz w6, 902\@f
+	ZERO_ACC
+	b 903\@f
+901\@:
 	INIT_ACC_OR_BIAS
+	b 903\@f
+902\@:
+	LOAD_C_PAIR_F32 x12, z16, z17, z18, z19
+	add x3, x12, x25, lsl #1
+	LOAD_C_PAIR_F32 x3, z20, z21, z22, z23
+	add x3, x12, x25, lsl #2
+	LOAD_C_PAIR_F32 x3, z24, z25, z26, z27
+	add x3, x3, x25, lsl #1
+	LOAD_C_PAIR_F32 x3, z28, z29, z30, z31
+903\@:
 	.endm
 
 	.macro LOAD_A_PAIR_TAIL zd, base, row
@@ -422,6 +437,17 @@
 	st1w {\a3\().s}, p1, [x3, z0.s, sxtw]
 	.endm
 
+	.macro LOAD_PAIR_M12 base, a0, a1, a2, a3
+	add x3, \base, #0
+	ld1w {\a0\().s}, p1/z, [x3, z0.s, sxtw]
+	add x3, \base, #8
+	ld1w {\a1\().s}, p1/z, [x3, z0.s, sxtw]
+	add x3, \base, #16
+	ld1w {\a2\().s}, p1/z, [x3, z0.s, sxtw]
+	add x3, \base, #24
+	ld1w {\a3\().s}, p1/z, [x3, z0.s, sxtw]
+	.endm
+
 	.macro M12_K4_BODY
 	ld1h {z4.h}, p0/z, [x17]
 	ld1h {z5.h}, p0/z, [x17, #1, mul vl]
@@ -505,6 +531,7 @@ bf16gemm_sve_kernel_asm:
 	ldp w19, w20, [x4]        // M, K
 	ldr w21, [x4, #8]         // N
 	ldr w22, [x4, #12]        // lda
+	ldr w29, [x4, #16]        // ldb: packed-B N-tile stride in K elements
 	ldr w23, [x4, #20]        // ldc
 	mov x28, x3               // packed A, or NULL for gather fallback
 
@@ -513,7 +540,7 @@ bf16gemm_sve_kernel_asm:
 	lsl x24, x22, #1          // lda bytes
 	lsl x25, x23, #2          // f32 ldc bytes
 	lsl x26, x23, #1          // bf16 ldc bytes
-	mul x13, x20, x27         // packed-B N-tile stride: K * VL bytes
+	mul x13, x29, x27         // packed-B N-tile stride: ldb * VL bytes
 	lsl x14, x27, #1          // f32 C N-tile advance
 
 	ptrue p0.b
@@ -862,17 +889,32 @@ bf16gemm_sve_tail_m2_asm:
 	.type bf16gemm_k_nld_f_m12, %function
 	.p2align 4
 bf16gemm_k_nld_f_m12:
+	mov w6, #0
+	b bf16gemm_sve_m12_asm
+	.size bf16gemm_k_nld_f_m12, .-bf16gemm_k_nld_f_m12
+
+	.global bf16gemm_k_ld_f_m12
+	.type bf16gemm_k_ld_f_m12, %function
+	.p2align 4
+bf16gemm_k_ld_f_m12:
+	mov w6, #1
+	b bf16gemm_sve_m12_asm
+	.size bf16gemm_k_ld_f_m12, .-bf16gemm_k_ld_f_m12
+
+	.p2align 4
+bf16gemm_sve_m12_asm:
 	SAVE_REGS
 
 	ldr w20, [x4, #4]         // K
 	ldr w21, [x4, #8]         // N
+	ldr w29, [x4, #16]        // ldb
 	ldr w23, [x4, #20]        // ldc
 	mov x28, x3               // packed A base
 
 	cntb x27
 	lsr x9, x27, #1
 	lsl x25, x23, #2
-	mul x13, x20, x27
+	mul x13, x29, x27
 	lsl x14, x27, #1
 	ptrue p0.b
 	ptrue p1.s
@@ -885,7 +927,24 @@ bf16gemm_k_nld_f_m12:
 	cmp w10, #0
 	b.le .L_m12_done
 
+	cbnz w6, .L_m12_load_c
 	ZERO_ACC_M12
+	b .L_m12_acc_ready
+.L_m12_load_c:
+	BUILD_F32_OFFSETS_M12
+	mov x16, x12
+	LOAD_PAIR_M12 x16, z8, z9, z10, z11
+	add x16, x12, x25, lsl #1
+	LOAD_PAIR_M12 x16, z12, z13, z14, z15
+	add x16, x12, x25, lsl #2
+	LOAD_PAIR_M12 x16, z16, z17, z18, z19
+	add x16, x16, x25, lsl #1
+	LOAD_PAIR_M12 x16, z20, z21, z22, z23
+	add x16, x12, x25, lsl #3
+	LOAD_PAIR_M12 x16, z24, z25, z26, z27
+	add x16, x16, x25, lsl #1
+	LOAD_PAIR_M12 x16, z28, z29, z30, z31
+.L_m12_acc_ready:
 	mov x17, x11
 	mov x18, x28
 	mov w15, w20
@@ -918,7 +977,6 @@ bf16gemm_k_nld_f_m12:
 .L_m12_done:
 	RESTORE_REGS
 	ret
-	.size bf16gemm_k_nld_f_m12, .-bf16gemm_k_nld_f_m12
 
 	.macro ENTRY_NO_BIAS name, loadc, storebf16
 	.global \name
@@ -962,10 +1020,14 @@ bf16gemm_k_nld_f_m12:
 	.size \name, .-\name
 	.endm
 
-	ENTRY_NO_BIAS bf16gemm_k_ld,     0, 0
+	ENTRY_NO_BIAS bf16gemm_k_ld,     1, 0
 	ENTRY_NO_BIAS_TO bf16gemm_k_ld1, bf16gemm_sve_tail_m2_asm, 0, 0
 	ENTRY_NO_BIAS_TO bf16gemm_k_ld2, bf16gemm_sve_tail_m2_asm, 0, 0
 	ENTRY_NO_BIAS_TO bf16gemm_k_ld4, bf16gemm_sve_tail_m4_asm, 0, 0
+	ENTRY_NO_BIAS bf16gemm_k_nld_f,  0, 0
+	ENTRY_NO_BIAS_TO bf16gemm_k_nld1_f, bf16gemm_sve_tail_m2_asm, 0, 0
+	ENTRY_NO_BIAS_TO bf16gemm_k_nld2_f, bf16gemm_sve_tail_m2_asm, 0, 0
+	ENTRY_NO_BIAS_TO bf16gemm_k_nld4_f, bf16gemm_sve_tail_m4_asm, 0, 0
 	ENTRY_NO_BIAS bf16gemm_k_ld_b,   0, 1
 	ENTRY_NO_BIAS_TO bf16gemm_k_ld1_b, bf16gemm_sve_tail_m2_asm, 0, 1
 	ENTRY_NO_BIAS_TO bf16gemm_k_ld2_b, bf16gemm_sve_tail_m2_asm, 0, 1

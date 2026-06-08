@@ -11,6 +11,8 @@ bench_perf
 bench_perf_sve
 bench_nld_sve
 *.o
+lib/build/
+tests/build/
 
 # Logs
 *.log

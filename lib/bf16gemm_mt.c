@@ -38,6 +38,50 @@ static void *aligned_alloc_64(size_t size) {
     return aligned_alloc(64, round_up_64(size));
 }
 
+static int bf16_effective_threads(int num_threads, int M, int n_tiles) {
+    if (num_threads <= 0) num_threads = omp_get_max_threads();
+    if (num_threads <= 0) num_threads = 1;
+
+    const char *clamp_env = getenv("BF16_NEON_CLAMP_THREADS");
+    int clamp_threads = clamp_env ? atoi(clamp_env) != 0 : 1;
+    if (!clamp_threads)
+        return num_threads;
+
+    int work_units = ((M + 7) / 8) * n_tiles;
+    if (work_units < 1)
+        work_units = 1;
+    if (num_threads > work_units)
+        num_threads = work_units;
+
+    if (M < 64 && n_tiles < num_threads * 4) {
+        int by_n = (n_tiles + 3) / 4;
+        if (by_n < 1)
+            by_n = 1;
+        if (num_threads > by_n)
+            num_threads = by_n;
+    }
+    return num_threads;
+}
+
+static int bf16_use_n_split(int M, int K_r, int N_r, int n_tiles,
+                            int num_threads) {
+    const char *split = getenv("BF16_NEON_SPLIT");
+    if (split) {
+        if (strcmp(split, "m") == 0)
+            return 0;
+        if (strcmp(split, "n") == 0)
+            return n_tiles >= num_threads;
+    }
+
+    if (num_threads <= 1 || n_tiles < num_threads)
+        return 0;
+    if (M / 8 < num_threads)
+        return 1;
+
+    const size_t b_panel_bytes = (size_t)K_r * (size_t)N_r * sizeof(bf16_t);
+    return b_panel_bytes >= 512u * 1024u && N_r >= M * 2;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Kernel declarations (from bf16gemm_k.S)
 // ═══════════════════════════════════════════════════════════════════════
@@ -178,7 +222,7 @@ static void tile_M(const bf16_t *A, const bf16_t *B_reo,
 // ═══════════════════════════════════════════════════════════════════════
 static void tile_N(const bf16_t *A, const bf16_t *B_reo,
                     f32_t *C, int M, int K_r, int N_r,
-                    int num_threads) {
+                    bf16_t *A_reo_pool, int num_threads) {
     int N8 = N_r / 8;
     int blocks_per_thread = N8 / num_threads;
     int extra_blocks       = N8 % num_threads;
@@ -201,8 +245,8 @@ static void tile_N(const bf16_t *A, const bf16_t *B_reo,
             int my_n       = my_blocks * 8;
             int my_n_start = start_block * 8;
 
-            bf16_t *my_A_reo = (bf16_t *)aligned_alloc_64(
-                (size_t)(M + 8) * K_r * sizeof(bf16_t));
+            bf16_t *my_A_reo = A_reo_pool +
+                (size_t)tid * (size_t)(M + 8) * (size_t)K_r;
             if (my_A_reo) {
                 // B: each N-block = K_r * 8 bf16 values
                 const bf16_t *my_B = B_reo + (uint64_t)start_block * K_r * 8;
@@ -211,7 +255,6 @@ static void tile_N(const bf16_t *A, const bf16_t *B_reo,
 
                 bf16_dispatch(A, my_B, my_C, M, K_r, my_n,
                               my_A_reo, /*ldc_global=*/N_r);
-                free(my_A_reo);
             }
         }
     }
@@ -230,12 +273,11 @@ static void tile_N(const bf16_t *A, const bf16_t *B_reo,
 void bf16gemm_mt_dispatch(const bf16_t *A, const bf16_t *B_reo,
                            f32_t *C, int M, int K_r, int N_r,
                            int num_threads) {
-    if (num_threads <= 0) num_threads = omp_get_max_threads();
-    if (num_threads <= 0) num_threads = 1;
+    const int n_tiles = N_r / 8;
+    num_threads = bf16_effective_threads(num_threads, M, n_tiles);
+    const int use_n_split = bf16_use_n_split(M, K_r, N_r, n_tiles, num_threads);
 
-    int M_blocks = M / 8;
-
-    if (M_blocks >= num_threads) {
+    if (!use_n_split) {
         // M-tiling: one shared A_reorder pool, partitioned by M rows.
         bf16_t *A_reo_pool = (bf16_t *)aligned_alloc_64(
             (size_t)(M + 8) * K_r * sizeof(bf16_t));
@@ -243,8 +285,13 @@ void bf16gemm_mt_dispatch(const bf16_t *A, const bf16_t *B_reo,
         tile_M(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads);
         free(A_reo_pool);
     } else {
-        // N-tiling: each thread allocates its own A_reorder
-        tile_N(A, B_reo, C, M, K_r, N_r, num_threads);
+        // N-tiling: fixed per-thread A_reorder slices avoid malloc/free in workers.
+        bf16_t *A_reo_pool = (bf16_t *)aligned_alloc_64(
+            (size_t)num_threads * (size_t)(M + 8) * (size_t)K_r *
+            sizeof(bf16_t));
+        if (!A_reo_pool) return;
+        tile_N(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads);
+        free(A_reo_pool);
     }
 }
 
@@ -415,7 +462,7 @@ static void tile_M_bf16_nld_b(const bf16_t *A, const bf16_t *B_reo,
 // ── tile_N_bf16_nld_b — N-tiling for nld bf16 output ─────────────────
 static void tile_N_bf16_nld_b(const bf16_t *A, const bf16_t *B_reo,
                                bf16_t *C, int M, int K_r, int N_r,
-                               int num_threads) {
+                               bf16_t *A_reo_pool, int num_threads) {
     int N8 = N_r / 8;
     int blocks_per_thread = N8 / num_threads;
     int extra_blocks       = N8 % num_threads;
@@ -435,14 +482,13 @@ static void tile_N_bf16_nld_b(const bf16_t *A, const bf16_t *B_reo,
         if (my_blocks > 0) {
             int my_n       = my_blocks * 8;
             int my_n_start = start_block * 8;
-            bf16_t *my_A_reo = (bf16_t *)aligned_alloc_64(
-                (size_t)(M + 8) * K_r * sizeof(bf16_t));
+            bf16_t *my_A_reo = A_reo_pool +
+                (size_t)tid * (size_t)(M + 8) * (size_t)K_r;
             if (my_A_reo) {
                 const bf16_t *my_B = B_reo + (uint64_t)start_block * K_r * 8;
                 bf16_t       *my_C = C + my_n_start;
                 bf16_nld_b_dispatch(A, my_B, my_C, M, K_r, my_n,
                                     my_A_reo, /*ldc_global=*/N_r);
-                free(my_A_reo);
             }
         }
     }
@@ -452,17 +498,22 @@ static void tile_N_bf16_nld_b(const bf16_t *A, const bf16_t *B_reo,
 void bf16gemm_mt_dispatch_nld_b(const bf16_t *A, const bf16_t *B_reo,
                                  bf16_t *C, int M, int K_r, int N_r,
                                  int num_threads) {
-    if (num_threads <= 0) num_threads = omp_get_max_threads();
-    if (num_threads <= 0) num_threads = 1;
-    int M_blocks = M / 8;
-    if (M_blocks >= num_threads) {
+    const int n_tiles = N_r / 8;
+    num_threads = bf16_effective_threads(num_threads, M, n_tiles);
+    const int use_n_split = bf16_use_n_split(M, K_r, N_r, n_tiles, num_threads);
+    if (!use_n_split) {
         bf16_t *A_reo_pool = (bf16_t *)aligned_alloc_64(
             (size_t)(M + 8) * K_r * sizeof(bf16_t));
         if (!A_reo_pool) return;
         tile_M_bf16_nld_b(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads);
         free(A_reo_pool);
     } else {
-        tile_N_bf16_nld_b(A, B_reo, C, M, K_r, N_r, num_threads);
+        bf16_t *A_reo_pool = (bf16_t *)aligned_alloc_64(
+            (size_t)num_threads * (size_t)(M + 8) * (size_t)K_r *
+            sizeof(bf16_t));
+        if (!A_reo_pool) return;
+        tile_N_bf16_nld_b(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads);
+        free(A_reo_pool);
     }
 }
 
@@ -634,7 +685,8 @@ static void tile_M_bf16_bias_f(const bf16_t *A, const bf16_t *B_reo,
 // ── tile_N_bf16_bias_f — N-tiling for bias fp32 output ────────────────
 static void tile_N_bf16_bias_f(const bf16_t *A, const bf16_t *B_reo,
                                 f32_t *C, int M, int K_r, int N_r,
-                                int num_threads, const f32_t *bias) {
+                                bf16_t *A_reo_pool, int num_threads,
+                                const f32_t *bias) {
     int N8 = N_r / 8;
     int blocks_per_thread = N8 / num_threads;
     int extra_blocks       = N8 % num_threads;
@@ -657,8 +709,8 @@ static void tile_N_bf16_bias_f(const bf16_t *A, const bf16_t *B_reo,
             int my_n       = my_blocks * 8;
             int my_n_start = start_block * 8;
 
-            bf16_t *my_A_reo = (bf16_t *)aligned_alloc_64(
-                (size_t)(M + 8) * K_r * sizeof(bf16_t));
+            bf16_t *my_A_reo = A_reo_pool +
+                (size_t)tid * (size_t)(M + 8) * (size_t)K_r;
             if (my_A_reo) {
                 const bf16_t *my_B    = B_reo + (uint64_t)start_block * K_r * 8;
                 f32_t        *my_C    = C + my_n_start;
@@ -666,7 +718,6 @@ static void tile_N_bf16_bias_f(const bf16_t *A, const bf16_t *B_reo,
 
                 bf16_dispatch_bias_f(A, my_B, my_C, M, K_r, my_n,
                                      my_A_reo, /*ldc_global=*/N_r, my_bias);
-                free(my_A_reo);
             }
         }
     }
@@ -676,12 +727,11 @@ static void tile_N_bf16_bias_f(const bf16_t *A, const bf16_t *B_reo,
 void bf16gemm_mt_dispatch_bias_f(const bf16_t *A, const bf16_t *B_reo,
                                   f32_t *C, int M, int K_r, int N_r,
                                   int num_threads, const f32_t *bias) {
-    if (num_threads <= 0) num_threads = omp_get_max_threads();
-    if (num_threads <= 0) num_threads = 1;
+    const int n_tiles = N_r / 8;
+    num_threads = bf16_effective_threads(num_threads, M, n_tiles);
+    const int use_n_split = bf16_use_n_split(M, K_r, N_r, n_tiles, num_threads);
 
-    int M_blocks = M / 8;
-
-    if (M_blocks >= num_threads) {
+    if (!use_n_split) {
         bf16_t *A_reo_pool = (bf16_t *)aligned_alloc_64(
             (size_t)(M + 8) * K_r * sizeof(bf16_t));
         if (!A_reo_pool) return;
@@ -689,7 +739,13 @@ void bf16gemm_mt_dispatch_bias_f(const bf16_t *A, const bf16_t *B_reo,
                             num_threads, bias);
         free(A_reo_pool);
     } else {
-        tile_N_bf16_bias_f(A, B_reo, C, M, K_r, N_r, num_threads, bias);
+        bf16_t *A_reo_pool = (bf16_t *)aligned_alloc_64(
+            (size_t)num_threads * (size_t)(M + 8) * (size_t)K_r *
+            sizeof(bf16_t));
+        if (!A_reo_pool) return;
+        tile_N_bf16_bias_f(A, B_reo, C, M, K_r, N_r, A_reo_pool,
+                           num_threads, bias);
+        free(A_reo_pool);
     }
 }
 

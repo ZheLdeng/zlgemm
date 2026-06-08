@@ -41,16 +41,22 @@ set -euo pipefail
 #   PRUNE_TOTAL_BYTES=$((3*1024*1024)) PRUNE_PER_THREAD_BYTES=$((4*1024*1024)) ./run_m8_parts.sh
 
 CC=${CC:-cc}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+LIB_DIR=${LIB_DIR:-"$ROOT_DIR/lib"}
+RESULTS_DIR=${RESULTS_DIR:-"$ROOT_DIR/results/m8"}
+mkdir -p "$RESULTS_DIR"
 ARCH_FLAGS=${ARCH_FLAGS:-"-march=armv8.6-a+sve+bf16"}
 OPT_FLAGS=${OPT_FLAGS:-"-O3"}
 OMP_FLAGS=${OMP_FLAGS:-"-fopenmp"}
-SVE_SRC=${SVE_SRC:-"bf16gemm_sve_m8_nld.S"}
-NEON_SRC=${NEON_SRC:-"bf16gemm_neon_m8_nld.S"}
-BENCH=${BENCH:-"bench_m8_parts.c"}
-TAIL_BENCH=${TAIL_BENCH:-"bench_full_tail.c"}
-OUT=${OUT:-"m8_parts_results.csv"}
-TAIL_OUT=${TAIL_OUT:-"m8_tail_results.csv"}
-RESULTS_XLSX=${RESULTS_XLSX:-"m8_results.xlsx"}
+INCLUDE_FLAGS=${INCLUDE_FLAGS:-"-I$LIB_DIR -I$SCRIPT_DIR"}
+SVE_SRC=${SVE_SRC:-"$SCRIPT_DIR/bf16gemm_sve_m8_nld.S"}
+NEON_SRC=${NEON_SRC:-"$SCRIPT_DIR/bf16gemm_neon_m8_nld.S"}
+BENCH=${BENCH:-"$SCRIPT_DIR/bench_m8_parts.c"}
+TAIL_BENCH=${TAIL_BENCH:-"$SCRIPT_DIR/bench_full_tail.c"}
+OUT=${OUT:-"$RESULTS_DIR/m8_parts_results.csv"}
+TAIL_OUT=${TAIL_OUT:-"$RESULTS_DIR/m8_tail_results.csv"}
+RESULTS_XLSX=${RESULTS_XLSX:-"$RESULTS_DIR/m8_results.xlsx"}
 WRITE_XLSX=${WRITE_XLSX:-1}
 KEEP_CSV=${KEEP_CSV:-0}
 REPS=${REPS:-100}
@@ -496,8 +502,8 @@ build_variant() {
     local obj="$WORKDIR/${variant}.o"
     local bin="$WORKDIR/bench_${variant}"
     generate_variant "$variant" "$src_s"
-    "$CC" $OPT_FLAGS $ARCH_FLAGS -c "$src_s" -o "$obj"
-    "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS "$BENCH" "$obj" -o "$bin"
+    "$CC" $OPT_FLAGS $ARCH_FLAGS $INCLUDE_FLAGS -c "$src_s" -o "$obj"
+    "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS "$BENCH" "$obj" -o "$bin"
 }
 
 build_source() {
@@ -505,8 +511,8 @@ build_source() {
     local src=$2
     local obj="$WORKDIR/${label}.o"
     local bin="$WORKDIR/bench_${label}"
-    "$CC" $OPT_FLAGS $ARCH_FLAGS -c "$src" -o "$obj"
-    "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS "$BENCH" "$obj" -o "$bin"
+    "$CC" $OPT_FLAGS $ARCH_FLAGS $INCLUDE_FLAGS -c "$src" -o "$obj"
+    "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS "$BENCH" "$obj" -o "$bin"
 }
 
 generate_neon_compute_only() {
@@ -654,8 +660,8 @@ build_neon_compute_only() {
     local obj="$WORKDIR/neon_compute_only.o"
     local bin="$WORKDIR/bench_neon_compute_only"
     generate_neon_compute_only "$src_s"
-    "$CC" $OPT_FLAGS $ARCH_FLAGS -I. -c "$src_s" -o "$obj"
-    "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS "$BENCH" "$obj" -o "$bin"
+    "$CC" $OPT_FLAGS $ARCH_FLAGS $INCLUDE_FLAGS -c "$src_s" -o "$obj"
+    "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS "$BENCH" "$obj" -o "$bin"
 }
 
 build_baseline() {
@@ -677,12 +683,14 @@ build_tail_full() {
     local bin="$WORKDIR/bench_tail_${impl}"
     case "$impl" in
         sve)
-            "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS "$TAIL_BENCH" \
-                bf16gemm_sve.c bf16gemm_sve.S -o "$bin" -lm
+            "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS "$TAIL_BENCH" \
+                "$LIB_DIR/bf16gemm_sve.c" "$LIB_DIR/bf16gemm_sve.S" \
+                "$LIB_DIR/i8gemm_sve.c" -o "$bin" -lm
             ;;
         neon)
-            "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS "$TAIL_BENCH" \
-                bf16gemm_mt.c bf16gemm_k.S bf16gemm_k_bias.S -o "$bin" -lm
+            "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS "$TAIL_BENCH" \
+                "$LIB_DIR/bf16gemm_mt.c" "$LIB_DIR/bf16gemm_k.S" \
+                "$LIB_DIR/bf16gemm_k_bias.S" -o "$bin" -lm
             ;;
         *) echo "unknown tail impl: $impl" >&2; exit 2 ;;
     esac
