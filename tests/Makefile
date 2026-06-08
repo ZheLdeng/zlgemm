@@ -11,7 +11,11 @@ OMP_FLAGS ?= -fopenmp
 CFLAGS ?= $(OPT_FLAGS) $(WARN_FLAGS) $(OMP_FLAGS) $(ARCH_FLAGS) -I$(LIB_DIR)
 LDLIBS ?= -lm
 
-SVE_KERNELS := $(LIB_DIR)/bf16gemm_sve.c $(LIB_DIR)/bf16gemm_sve.S $(LIB_DIR)/i8gemm_sve.c
+SVE_KERNELS := \
+	$(LIB_DIR)/bf16gemm_sve.c \
+	$(LIB_DIR)/bf16gemm_sve.S \
+	$(LIB_DIR)/i8gemm_sve.c \
+	$(LIB_DIR)/i8gemm_sve.S
 NEON_KERNELS := \
 	$(LIB_DIR)/bf16gemm_mt.c \
 	$(LIB_DIR)/bf16gemm_k.S \

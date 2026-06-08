@@ -103,233 +103,35 @@ void i8_pack_B(const i8_t *B, i8_t *B_reo, int K, int N) {
     }
 }
 
-static void i8_sve_kernel(const i8_t *A, const i8_t *B_reo,
-                          void *C, const gemm_params_t *params,
-                          int max_m, int load_c, int store_f32,
-                          const f32_t *bias) {
-    const int M = params->m;
-    const int K = params->k;
-    const int N = params->n;
-    const int lda = params->lda;
-    const int ldc = params->ldc;
-    const int segs = i8_sve_segments();
-    const int n_tile = segs * 8;
-    svbool_t pg_b8 = svptrue_b8();
-    svbool_t pg_i32 = svptrue_b32();
-
-    for (int m0 = 0; m0 < M; m0 += max_m) {
-        int m_now = M - m0;
-        if (m_now > max_m)
-            m_now = max_m;
-
-        for (int n0 = 0; n0 < N; n0 += n_tile) {
-            svint32_t acc00, acc01, acc02, acc03;
-            svint32_t acc10, acc11, acc12, acc13;
-            svint32_t acc20, acc21, acc22, acc23;
-            svint32_t acc30, acc31, acc32, acc33;
-
-#define I8_INIT_ACC(VAR, RP, CP) do {                                   \
-                int r0_ = (RP) * 2;                                     \
-                int r1_ = r0_ + 1;                                      \
-                if (load_c) {                                           \
-                    i32_t tmp_[64];                                     \
-                    memset(tmp_, 0, sizeof(tmp_));                       \
-                    for (int sg = 0; sg < segs; sg++) {                 \
-                        int c0_ = n0 + sg * 8 + (CP) * 2;               \
-                        tmp_[sg * 4 + 0] = (r0_ < m_now) ? ((i32_t *)C)[(m0 + r0_) * (size_t)ldc + c0_] : 0; \
-                        tmp_[sg * 4 + 1] = (r0_ < m_now) ? ((i32_t *)C)[(m0 + r0_) * (size_t)ldc + c0_ + 1] : 0; \
-                        tmp_[sg * 4 + 2] = (r1_ < m_now) ? ((i32_t *)C)[(m0 + r1_) * (size_t)ldc + c0_] : 0; \
-                        tmp_[sg * 4 + 3] = (r1_ < m_now) ? ((i32_t *)C)[(m0 + r1_) * (size_t)ldc + c0_ + 1] : 0; \
-                    }                                                   \
-                    VAR = svld1_s32(pg_i32, tmp_);                     \
-                } else {                                                \
-                    VAR = svdup_s32(0);                                 \
-                }                                                       \
-            } while (0)
-
-            I8_INIT_ACC(acc00, 0, 0);
-            I8_INIT_ACC(acc01, 0, 1);
-            I8_INIT_ACC(acc02, 0, 2);
-            I8_INIT_ACC(acc03, 0, 3);
-            I8_INIT_ACC(acc10, 1, 0);
-            I8_INIT_ACC(acc11, 1, 1);
-            I8_INIT_ACC(acc12, 1, 2);
-            I8_INIT_ACC(acc13, 1, 3);
-            I8_INIT_ACC(acc20, 2, 0);
-            I8_INIT_ACC(acc21, 2, 1);
-            I8_INIT_ACC(acc22, 2, 2);
-            I8_INIT_ACC(acc23, 2, 3);
-            I8_INIT_ACC(acc30, 3, 0);
-            I8_INIT_ACC(acc31, 3, 1);
-            I8_INIT_ACC(acc32, 3, 2);
-            I8_INIT_ACC(acc33, 3, 3);
-
-            const i8_t *B_tile = B_reo + (size_t)(n0 / n_tile) * K * n_tile;
-            for (int kb = 0; kb < K; kb += 8) {
-                size_t boff0 = (((size_t)(kb / 8) * 4 + 0) * segs) * 16;
-                size_t boff1 = (((size_t)(kb / 8) * 4 + 1) * segs) * 16;
-                size_t boff2 = (((size_t)(kb / 8) * 4 + 2) * segs) * 16;
-                size_t boff3 = (((size_t)(kb / 8) * 4 + 3) * segs) * 16;
-                svint8_t b0 = svld1_s8(pg_b8, B_tile + boff0);
-                svint8_t b1 = svld1_s8(pg_b8, B_tile + boff1);
-                svint8_t b2 = svld1_s8(pg_b8, B_tile + boff2);
-                svint8_t b3 = svld1_s8(pg_b8, B_tile + boff3);
-
-#define I8_UPDATE_ROW(RP, A0, A1, A2, A3) do {                          \
-                    int r0_ = (RP) * 2;                                 \
-                    int r1_ = r0_ + 1;                                  \
-                    i8_t a_tmp_[16] = {0};                              \
-                    if (r0_ < m_now)                                    \
-                        memcpy(a_tmp_, A + (size_t)(m0 + r0_) * lda + kb, 8); \
-                    if (r1_ < m_now)                                    \
-                        memcpy(a_tmp_ + 8, A + (size_t)(m0 + r1_) * lda + kb, 8); \
-                    svint8_t az_ = svld1rq_s8(pg_b8, a_tmp_);           \
-                    A0 = svmmla_s32(A0, az_, b0);                       \
-                    A1 = svmmla_s32(A1, az_, b1);                       \
-                    A2 = svmmla_s32(A2, az_, b2);                       \
-                    A3 = svmmla_s32(A3, az_, b3);                       \
-                } while (0)
-
-                I8_UPDATE_ROW(0, acc00, acc01, acc02, acc03);
-                I8_UPDATE_ROW(1, acc10, acc11, acc12, acc13);
-                I8_UPDATE_ROW(2, acc20, acc21, acc22, acc23);
-                I8_UPDATE_ROW(3, acc30, acc31, acc32, acc33);
-            }
-
-#define I8_STORE_ACC(VAR, RP, CP) do {                                  \
-                int r0_ = (RP) * 2;                                     \
-                int r1_ = r0_ + 1;                                      \
-                i32_t tmp_[64];                                         \
-                svst1_s32(pg_i32, tmp_, VAR);                           \
-                for (int sg = 0; sg < segs; sg++) {                     \
-                    int c0_ = n0 + sg * 8 + (CP) * 2;                   \
-                    i32_t v00_ = tmp_[sg * 4 + 0];                      \
-                    i32_t v01_ = tmp_[sg * 4 + 1];                      \
-                    i32_t v10_ = tmp_[sg * 4 + 2];                      \
-                    i32_t v11_ = tmp_[sg * 4 + 3];                      \
-                    if (store_f32) {                                    \
-                        f32_t *Cf_ = (f32_t *)C;                        \
-                        if (r0_ < m_now) {                              \
-                            Cf_[(m0 + r0_) * (size_t)ldc + c0_] = (f32_t)v00_ + (bias ? bias[c0_] : 0.0f); \
-                            Cf_[(m0 + r0_) * (size_t)ldc + c0_ + 1] = (f32_t)v01_ + (bias ? bias[c0_ + 1] : 0.0f); \
-                        }                                               \
-                        if (r1_ < m_now) {                              \
-                            Cf_[(m0 + r1_) * (size_t)ldc + c0_] = (f32_t)v10_ + (bias ? bias[c0_] : 0.0f); \
-                            Cf_[(m0 + r1_) * (size_t)ldc + c0_ + 1] = (f32_t)v11_ + (bias ? bias[c0_ + 1] : 0.0f); \
-                        }                                               \
-                    } else {                                            \
-                        i32_t *Ci_ = (i32_t *)C;                        \
-                        if (r0_ < m_now) {                              \
-                            Ci_[(m0 + r0_) * (size_t)ldc + c0_] = v00_; \
-                            Ci_[(m0 + r0_) * (size_t)ldc + c0_ + 1] = v01_; \
-                        }                                               \
-                        if (r1_ < m_now) {                              \
-                            Ci_[(m0 + r1_) * (size_t)ldc + c0_] = v10_; \
-                            Ci_[(m0 + r1_) * (size_t)ldc + c0_ + 1] = v11_; \
-                        }                                               \
-                    }                                                   \
-                }                                                       \
-            } while (0)
-
-            I8_STORE_ACC(acc00, 0, 0);
-            I8_STORE_ACC(acc01, 0, 1);
-            I8_STORE_ACC(acc02, 0, 2);
-            I8_STORE_ACC(acc03, 0, 3);
-            I8_STORE_ACC(acc10, 1, 0);
-            I8_STORE_ACC(acc11, 1, 1);
-            I8_STORE_ACC(acc12, 1, 2);
-            I8_STORE_ACC(acc13, 1, 3);
-            I8_STORE_ACC(acc20, 2, 0);
-            I8_STORE_ACC(acc21, 2, 1);
-            I8_STORE_ACC(acc22, 2, 2);
-            I8_STORE_ACC(acc23, 2, 3);
-            I8_STORE_ACC(acc30, 3, 0);
-            I8_STORE_ACC(acc31, 3, 1);
-            I8_STORE_ACC(acc32, 3, 2);
-            I8_STORE_ACC(acc33, 3, 3);
-
-#undef I8_STORE_ACC
-#undef I8_UPDATE_ROW
-#undef I8_INIT_ACC
-        }
-    }
-}
 
 void i8gemm_k_ld(const i8_t *A, const i8_t *B_reo, i32_t *C,
-                 i8_t *A_reorder, const gemm_params_t *params) {
-    (void)A_reorder;
-    i8_sve_kernel(A, B_reo, C, params, 8, 1, 0, NULL);
-}
-
+                 i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_ld1(const i8_t *A, const i8_t *B_reo, i32_t *C,
-                  i8_t *A_reorder, const gemm_params_t *params) {
-    (void)A_reorder;
-    i8_sve_kernel(A, B_reo, C, params, 1, 1, 0, NULL);
-}
-
+                  i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_ld2(const i8_t *A, const i8_t *B_reo, i32_t *C,
-                  i8_t *A_reorder, const gemm_params_t *params) {
-    (void)A_reorder;
-    i8_sve_kernel(A, B_reo, C, params, 2, 1, 0, NULL);
-}
-
+                  i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_ld4(const i8_t *A, const i8_t *B_reo, i32_t *C,
-                  i8_t *A_reorder, const gemm_params_t *params) {
-    (void)A_reorder;
-    i8_sve_kernel(A, B_reo, C, params, 4, 1, 0, NULL);
-}
-
+                  i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_ld_f(const i8_t *A, const i8_t *B_reo, f32_t *C,
-                   i8_t *A_reorder, const gemm_params_t *params) {
-    (void)A_reorder;
-    i8_sve_kernel(A, B_reo, C, params, 8, 0, 1, NULL);
-}
-
+                   i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_ld1_f(const i8_t *A, const i8_t *B_reo, f32_t *C,
-                    i8_t *A_reorder, const gemm_params_t *params) {
-    (void)A_reorder;
-    i8_sve_kernel(A, B_reo, C, params, 1, 0, 1, NULL);
-}
-
+                    i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_ld2_f(const i8_t *A, const i8_t *B_reo, f32_t *C,
-                    i8_t *A_reorder, const gemm_params_t *params) {
-    (void)A_reorder;
-    i8_sve_kernel(A, B_reo, C, params, 2, 0, 1, NULL);
-}
-
+                    i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_ld4_f(const i8_t *A, const i8_t *B_reo, f32_t *C,
-                    i8_t *A_reorder, const gemm_params_t *params) {
-    (void)A_reorder;
-    i8_sve_kernel(A, B_reo, C, params, 4, 0, 1, NULL);
-}
-
+                    i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_ld_bias_f(const i8_t *A, const i8_t *B_reo, f32_t *C,
                         i8_t *A_reorder, const gemm_params_t *params,
-                        const f32_t *bias) {
-    (void)A_reorder;
-    i8_sve_kernel(A, B_reo, C, params, 8, 0, 1, bias);
-}
-
+                        const f32_t *bias);
 void i8gemm_k_ld1_bias_f(const i8_t *A, const i8_t *B_reo, f32_t *C,
                          i8_t *A_reorder, const gemm_params_t *params,
-                         const f32_t *bias) {
-    (void)A_reorder;
-    i8_sve_kernel(A, B_reo, C, params, 1, 0, 1, bias);
-}
-
+                         const f32_t *bias);
 void i8gemm_k_ld2_bias_f(const i8_t *A, const i8_t *B_reo, f32_t *C,
                          i8_t *A_reorder, const gemm_params_t *params,
-                         const f32_t *bias) {
-    (void)A_reorder;
-    i8_sve_kernel(A, B_reo, C, params, 2, 0, 1, bias);
-}
-
+                         const f32_t *bias);
 void i8gemm_k_ld4_bias_f(const i8_t *A, const i8_t *B_reo, f32_t *C,
                          i8_t *A_reorder, const gemm_params_t *params,
-                         const f32_t *bias) {
-    (void)A_reorder;
-    i8_sve_kernel(A, B_reo, C, params, 4, 0, 1, bias);
-}
+                         const f32_t *bias);
 
 static void i8_dispatch_i32(const i8_t *A, const i8_t *B_reo, i32_t *C,
                             int M, int K_r, int N_r, int ldc) {

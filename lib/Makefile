@@ -21,7 +21,8 @@ NEON_SHARED := $(BUILD_DIR)/libi8gemm_neon.so
 SVE_OBJS := \
 	$(BUILD_DIR)/bf16gemm_sve_c.o \
 	$(BUILD_DIR)/bf16gemm_sve_asm.o \
-	$(BUILD_DIR)/i8gemm_sve.o
+	$(BUILD_DIR)/i8gemm_sve_c.o \
+	$(BUILD_DIR)/i8gemm_sve_asm.o
 
 NEON_OBJS := \
 	$(BUILD_DIR)/bf16gemm_mt.o \
@@ -52,7 +53,10 @@ $(BUILD_DIR)/bf16gemm_sve_c.o: bf16gemm_sve.c bf16gemm.h bf16gemm_sve.h gemm_par
 $(BUILD_DIR)/bf16gemm_sve_asm.o: bf16gemm_sve.S gemm_params.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/i8gemm_sve.o: i8gemm_sve.c i8gemm.h gemm_params.h | $(BUILD_DIR)
+$(BUILD_DIR)/i8gemm_sve_c.o: i8gemm_sve.c i8gemm.h gemm_params.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/i8gemm_sve_asm.o: i8gemm_sve.S gemm_params.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/bf16gemm_mt.o: bf16gemm_mt.c bf16gemm.h gemm_params.h | $(BUILD_DIR)
