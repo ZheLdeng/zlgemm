@@ -34,6 +34,8 @@ set -euo pipefail
 #   RUN_STRIDE=1 STRIDE_FACTORS="1 2" ./run_m8_parts.sh
 #   RUN_BATCH=1 BATCH_COUNTS="1 4 16" ./run_m8_parts.sh
 #   RUN_DISPATCH=1 DISPATCH_IMPLS="sve neon" DISPATCH_DTYPES="bf16 i8" ./run_m8_parts.sh
+#   CASE_MODE=lite enables RUN_DISPATCH=1 by default so the workbook includes
+#   public-dispatch performance for the current integrated BF16/I8 paths.
 #   RUN_TAILS=1 TAIL_BASE_M_VALUES=16 TAIL_DELTAS="1 2 4" ./run_m8_parts.sh
 #   RESULTS_XLSX=/tmp/m8.xlsx ./run_m8_parts.sh
 #   KEEP_CSV=1 OUT=/tmp/m8_parts.csv TAIL_OUT=/tmp/m8_tail.csv ./run_m8_parts.sh
@@ -116,6 +118,7 @@ if [[ "$CASE_MODE" == "lite" ]]; then
     THREADS=${THREADS:-"1 2 4 8"}
     CASES=${CASES:-"$LITE_CASES"}
     RUN_TAILS=${RUN_TAILS:-1}
+    RUN_DISPATCH=${RUN_DISPATCH:-1}
     TAIL_CASES=${TAIL_CASES:-"512,4096,1024 64,512,4096 2048,4096,64"}
 else
     REPS=${REPS:-100}
