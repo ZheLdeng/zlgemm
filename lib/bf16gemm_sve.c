@@ -224,9 +224,27 @@ static int bf16_clamp_threads_for_split(int num_threads, int M, int n_tiles,
     return num_threads;
 }
 
-static int bf16_use_2d_split(void) {
+static int bf16_use_2d_split(int M, int K_r, int N_r, int n_tiles,
+                             int num_threads) {
     const char *split = getenv("BF16_SVE_SPLIT");
-    return split && strcmp(split, "2d") == 0;
+    if (split)
+        return strcmp(split, "2d") == 0;
+
+    if (num_threads < 10 || K_r < 512)
+        return 0;
+
+    /*
+     * v2 80c data shows SVE BF16 benefits from 2D splitting once there are
+     * enough M and N work units to keep high thread counts busy.  The guard
+     * avoids using 2D for tiny grids where extra task geometry costs more than
+     * it saves.
+     */
+    const int m_units = (M + 7) / 8;
+    if (m_units < 2 || n_tiles < 1)
+        return 0;
+    if ((size_t)m_units * (size_t)n_tiles < (size_t)num_threads * 2)
+        return 0;
+    return M >= 64 || N_r >= 64;
 }
 
 static int bf16_use_ngroup_split(void) {
@@ -853,7 +871,8 @@ void bf16gemm_mt_dispatch(const bf16_t *A, const bf16_t *B_reo,
         return;
     }
 
-    if (bf16_use_2d_split() && num_threads > 1) {
+    if (bf16_use_2d_split(M, K_r, N_r, n_tiles, num_threads) &&
+        num_threads > 1) {
         int blocks12 = (!no_reorder &&
                         M >= bf16_sve_schedule.n_split_m12_min_m &&
                         K_r >= bf16_sve_schedule.n_split_m12_min_k) ?

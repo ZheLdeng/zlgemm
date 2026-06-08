@@ -70,6 +70,12 @@
 301:
 	.endm
 
+	.macro ADVANCE_PREPACKED_A_0
+	add  A_REORDER, A_REORDER, K, lsl #3
+	.endm
+	.macro ADVANCE_PREPACKED_A_1
+	.endm
+
 // ── INIT / RESTORE ────────────────────────────────────
 	.macro INIT
 	stp x19, x20, [sp, #-16]!
@@ -791,7 +797,7 @@
 //   \c_adv      : C column advance in bytes (32 = 8×f32)
 // ═══════════════════════════════════════════════════════
 
-	.macro GEMM_BODY_BIAS func_name, mrows, cmpsfx, load_z, store_c, ldc_shift, c_adv
+	.macro GEMM_BODY_BIAS func_name, mrows, cmpsfx, load_z, store_c, ldc_shift, c_adv, first_n
 
 #ifdef __APPLE__
 	.global _\func_name
@@ -823,7 +829,7 @@ _\func_name:
 	// Reset per-M-block state; reload bias pointer for this M block
 	ldr  BIAS_ADDR, [sp]            // reload original bias from our slot
 	mov  A_REORDER_M, A_REORDER
-	mov  FIRST_N, #1
+	mov  FIRST_N, #\first_n
 	mov  C_N_BASE, C_ROW_BASE
 	mov  B_N_BASE, B_ADDR
 
@@ -902,6 +908,7 @@ _\func_name:
 	subs N_COUNT, N_COUNT, #1
 	b.gt .L\func_name\()_n_iter
 
+	ADVANCE_PREPACKED_A_\first_n
 	M_LOOP_END_\mrows
 
 .L\func_name\()_end:
@@ -916,9 +923,15 @@ _\func_name:
 // ═══════════════════════════════════════════════════════
 
 // Main kernel (m=8)
-GEMM_BODY_BIAS i8gemm_k_ld_bias_f,  8, 8, LOAD_ZERO_8, STORE_C_ROWMAJOR_F_BIAS, 2, 32
+GEMM_BODY_BIAS i8gemm_k_ld_bias_f,  8, 8, LOAD_ZERO_8, STORE_C_ROWMAJOR_F_BIAS, 2, 32, 1
 
 // Tail kernels (m=1,2,4)
-GEMM_BODY_BIAS i8gemm_k_ld1_bias_f, 1, 2, LOAD_ZERO_2, STORE_C_1_F_BIAS,        2, 32
-GEMM_BODY_BIAS i8gemm_k_ld2_bias_f, 2, 2, LOAD_ZERO_2, STORE_C_2_F_BIAS,        2, 32
-GEMM_BODY_BIAS i8gemm_k_ld4_bias_f, 4, 4, LOAD_ZERO_4, STORE_C_4_F_BIAS,        2, 32
+GEMM_BODY_BIAS i8gemm_k_ld1_bias_f, 1, 2, LOAD_ZERO_2, STORE_C_1_F_BIAS,        2, 32, 1
+GEMM_BODY_BIAS i8gemm_k_ld2_bias_f, 2, 2, LOAD_ZERO_2, STORE_C_2_F_BIAS,        2, 32, 1
+GEMM_BODY_BIAS i8gemm_k_ld4_bias_f, 4, 4, LOAD_ZERO_4, STORE_C_4_F_BIAS,        2, 32, 1
+
+// Prepacked-A variants: start directly from cached A_reorder.
+GEMM_BODY_BIAS i8gemm_k_reo_ld_bias_f,  8, 8, LOAD_ZERO_8, STORE_C_ROWMAJOR_F_BIAS, 2, 32, 0
+GEMM_BODY_BIAS i8gemm_k_reo_ld1_bias_f, 1, 2, LOAD_ZERO_2, STORE_C_1_F_BIAS,        2, 32, 0
+GEMM_BODY_BIAS i8gemm_k_reo_ld2_bias_f, 2, 2, LOAD_ZERO_2, STORE_C_2_F_BIAS,        2, 32, 0
+GEMM_BODY_BIAS i8gemm_k_reo_ld4_bias_f, 4, 4, LOAD_ZERO_4, STORE_C_4_F_BIAS,        2, 32, 0

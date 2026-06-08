@@ -22,7 +22,8 @@ SVE_OBJS := \
 	$(BUILD_DIR)/bf16gemm_sve_c.o \
 	$(BUILD_DIR)/bf16gemm_sve_asm.o \
 	$(BUILD_DIR)/i8gemm_sve_c.o \
-	$(BUILD_DIR)/i8gemm_sve_asm.o
+	$(BUILD_DIR)/i8gemm_sve_asm.o \
+	$(BUILD_DIR)/i8gemm_pack_a_neon.o
 
 NEON_OBJS := \
 	$(BUILD_DIR)/bf16gemm_mt.o \
@@ -30,7 +31,8 @@ NEON_OBJS := \
 	$(BUILD_DIR)/bf16gemm_k.o \
 	$(BUILD_DIR)/bf16gemm_k_bias.o \
 	$(BUILD_DIR)/i8gemm_k.o \
-	$(BUILD_DIR)/i8gemm_k_bias.o
+	$(BUILD_DIR)/i8gemm_k_bias.o \
+	$(BUILD_DIR)/i8gemm_pack_a_neon.o
 
 .PHONY: all static shared sve neon clean
 
@@ -75,6 +77,9 @@ $(BUILD_DIR)/i8gemm_k.o: i8gemm_k.S gemm_params.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/i8gemm_k_bias.o: i8gemm_k_bias.S gemm_params.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/i8gemm_pack_a_neon.o: i8gemm_pack_a_neon.S | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(SVE_STATIC): $(SVE_OBJS)

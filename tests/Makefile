@@ -15,14 +15,16 @@ SVE_KERNELS := \
 	$(LIB_DIR)/bf16gemm_sve.c \
 	$(LIB_DIR)/bf16gemm_sve.S \
 	$(LIB_DIR)/i8gemm_sve.c \
-	$(LIB_DIR)/i8gemm_sve.S
+	$(LIB_DIR)/i8gemm_sve.S \
+	$(LIB_DIR)/i8gemm_pack_a_neon.S
 NEON_KERNELS := \
 	$(LIB_DIR)/bf16gemm_mt.c \
 	$(LIB_DIR)/bf16gemm_k.S \
 	$(LIB_DIR)/bf16gemm_k_bias.S \
 	$(LIB_DIR)/i8gemm_mt.c \
 	$(LIB_DIR)/i8gemm_k.S \
-	$(LIB_DIR)/i8gemm_k_bias.S
+	$(LIB_DIR)/i8gemm_k_bias.S \
+	$(LIB_DIR)/i8gemm_pack_a_neon.S
 
 .PHONY: all test test-sve test-neon bench-sve bench-neon bench-nld-sve bench-tp m8-interfaces clean
 

@@ -704,10 +704,21 @@ flags = {
 
 init_ab = [
     "\tmov z0.b, #1",
+    "\tmov z1.b, #1",
+    "\tmov z2.b, #1",
+    "\tmov z3.b, #1",
     "\tmov z4.b, #1",
     "\tmov z5.b, #1",
     "\tmov z6.b, #1",
     "\tmov z7.b, #1",
+    "\tmov z8.b, #1",
+    "\tmov z9.b, #1",
+    "\tmov z10.b, #1",
+    "\tmov z11.b, #1",
+    "\tmov z12.b, #1",
+    "\tmov z13.b, #1",
+    "\tmov z14.b, #1",
+    "\tmov z15.b, #1",
 ]
 
 out = []
@@ -722,6 +733,9 @@ for line in lines:
     if "no_store" in flags and stripped.startswith("STORE_ROW "):
         out.append("//" + line)
         continue
+    if "no_store" in flags and stripped.startswith("STORE_ROW_I32_FAST "):
+        out.append("//" + line)
+        continue
     if "no_ab_load" in flags:
         if stripped.startswith("ld1b z4.b") or stripped.startswith("ld1b z5.b"):
             out.append("//" + line)
@@ -729,7 +743,16 @@ for line in lines:
         if stripped.startswith("ld1b z6.b") or stripped.startswith("ld1b z7.b"):
             out.append("//" + line)
             continue
+        if stripped.startswith("ld1b z12.b") or stripped.startswith("ld1b z13.b"):
+            out.append("//" + line)
+            continue
+        if stripped.startswith("ld1b z14.b") or stripped.startswith("ld1b z15.b"):
+            out.append("//" + line)
+            continue
         if stripped.startswith("LOAD_A_PAIR "):
+            out.append("//" + line)
+            continue
+        if stripped == "LOAD_AB_PACKED_CUR" or stripped == "LOAD_AB_PACKED_NEXT":
             out.append("//" + line)
             continue
     out.append(line)
@@ -1073,9 +1096,10 @@ build_tail_full() {
     local bin="$WORKDIR/bench_tail_${impl}"
     case "$impl" in
         sve)
-            "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS "$TAIL_BENCH" \
+                "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS "$TAIL_BENCH" \
                 "$LIB_DIR/bf16gemm_sve.c" "$LIB_DIR/bf16gemm_sve.S" \
                 "$LIB_DIR/i8gemm_sve.c" "$LIB_DIR/i8gemm_sve.S" \
+                "$LIB_DIR/i8gemm_pack_a_neon.S" \
                 -o "$bin" -lm
             ;;
         neon)
@@ -1096,6 +1120,7 @@ build_dispatch() {
                 "$DISPATCH_BENCH" \
                 "$LIB_DIR/bf16gemm_sve.c" "$LIB_DIR/bf16gemm_sve.S" \
                 "$LIB_DIR/i8gemm_sve.c" "$LIB_DIR/i8gemm_sve.S" \
+                "$LIB_DIR/i8gemm_pack_a_neon.S" \
                 -o "$bin" -lm
             ;;
         neon)
@@ -1105,6 +1130,7 @@ build_dispatch() {
                 "$LIB_DIR/bf16gemm_k_bias.S" \
                 "$LIB_DIR/i8gemm_mt.c" "$LIB_DIR/i8gemm_k.S" \
                 "$LIB_DIR/i8gemm_k_bias.S" \
+                "$LIB_DIR/i8gemm_pack_a_neon.S" \
                 -o "$bin" -lm
             ;;
         *) echo "unknown dispatch impl: $impl" >&2; exit 2 ;;

@@ -76,6 +76,16 @@ static int i8_use_n_split(int M, int K_r, int N_r, int n_tiles,
 
     if (num_threads <= 1 || n_tiles < num_threads)
         return 0;
+
+    /*
+     * 80c opt-parts data shows large NEON I8 shapes with N ~= 2*M are much
+     * faster with M splitting: N-split repeats the M sweep for every N shard
+     * and exposes the online A-pack/store overhead.  Very wide N (for example
+     * N >= 4*M) still prefers N splitting.
+     */
+    if (num_threads >= 16 && M >= 512 && K_r >= 512 && N_r <= M * 2)
+        return 0;
+
     if (M / 8 < num_threads)
         return 1;
 
@@ -98,6 +108,91 @@ void i8gemm_k_ld2(const i8_t *A, const i8_t *B_reo,
 void i8gemm_k_ld4(const i8_t *A, const i8_t *B_reo,
                   i32_t *C, i8_t *A_reorder,
                   const gemm_params_t *params);
+void i8gemm_k_reo_ld (const i8_t *A, const i8_t *B_reo,
+                      i32_t *C, i8_t *A_reorder,
+                      const gemm_params_t *params);
+void i8gemm_k_reo_ld1(const i8_t *A, const i8_t *B_reo,
+                      i32_t *C, i8_t *A_reorder,
+                      const gemm_params_t *params);
+void i8gemm_k_reo_ld2(const i8_t *A, const i8_t *B_reo,
+                      i32_t *C, i8_t *A_reorder,
+                      const gemm_params_t *params);
+void i8gemm_k_reo_ld4(const i8_t *A, const i8_t *B_reo,
+                      i32_t *C, i8_t *A_reorder,
+                      const gemm_params_t *params);
+
+void i8_pack_A_neon_m8_asm(const i8_t *A, i8_t *P, int K_r, int lda);
+void i8_pack_A_neon_m4_asm(const i8_t *A, i8_t *P, int K_r, int lda);
+void i8_pack_A_neon_m2_asm(const i8_t *A, i8_t *P, int K_r, int lda);
+void i8_pack_A_neon_m1_asm(const i8_t *A, i8_t *P, int K_r, int lda);
+
+static size_t i8_neon_a_reorder_bytes(int M, int K_r) {
+    return (size_t)(M + 8) * (size_t)K_r * sizeof(i8_t);
+}
+
+static int i8_neon_pack_a_thread_count(int num_threads, int M, int K_r) {
+    if (num_threads <= 1)
+        return 1;
+
+    int blocks = (M + 7) / 8;
+    if (blocks < 1)
+        blocks = 1;
+    if (num_threads > blocks)
+        num_threads = blocks;
+
+    const char *env = getenv("I8_NEON_PACK_A_MIN_BYTES_PER_THREAD");
+    size_t min_bytes = env ? (size_t)strtoull(env, NULL, 0) : 32u * 1024u;
+    size_t bytes = (size_t)M * (size_t)K_r;
+    while (num_threads > 1 &&
+           bytes / (size_t)num_threads < min_bytes)
+        num_threads--;
+
+    return num_threads < 1 ? 1 : num_threads;
+}
+
+static void i8_pack_A_neon(const i8_t *A, i8_t *P, int M, int K_r,
+                           int lda, int num_threads) {
+    int m_full = (M / 8) * 8;
+    int pack_threads = i8_neon_pack_a_thread_count(num_threads, M, K_r);
+
+    #pragma omp parallel for num_threads(pack_threads) schedule(static)
+    for (int m0 = 0; m0 < m_full; m0 += 8) {
+        i8_pack_A_neon_m8_asm(A + (size_t)m0 * (size_t)lda,
+                              P + (size_t)m0 * (size_t)K_r, K_r, lda);
+    }
+
+    int processed = m_full;
+    int m_rem = M - processed;
+    i8_t *tail = P + (size_t)processed * (size_t)K_r;
+    const i8_t *At = A + (size_t)processed * (size_t)lda;
+
+    if (m_rem >= 4) {
+        i8_pack_A_neon_m4_asm(At, tail, K_r, lda);
+        processed += 4;
+        m_rem -= 4;
+        At = A + (size_t)processed * (size_t)lda;
+        tail = P + (size_t)processed * (size_t)K_r;
+    }
+    if (m_rem >= 2) {
+        i8_pack_A_neon_m2_asm(At, tail, K_r, lda);
+        processed += 2;
+        m_rem -= 2;
+        At = A + (size_t)processed * (size_t)lda;
+        tail = P + (size_t)processed * (size_t)K_r;
+    }
+    if (m_rem >= 1)
+        i8_pack_A_neon_m1_asm(At, tail, K_r, lda);
+}
+
+static int i8_neon_offline_a_reorder_mode(void) {
+    const char *env = getenv("I8_NEON_OFFLINE_A_REORDER");
+    if (!env)
+        return 1;  // default: offline-pack A only for N-split.
+    int mode = atoi(env);
+    if (mode < 0)
+        mode = 0;
+    return mode;
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // i8_pack_B — Pack B matrix for smmla kernel (caller allocates B_reo)
@@ -170,12 +265,55 @@ static void i8_dispatch(const i8_t *A, const i8_t *B_reo,
     }
 }
 
+static void i8_dispatch_reo(const i8_t *A, const i8_t *B_reo,
+                            i32_t *C, int m, int k, int n,
+                            i8_t *A_reorder, int ldc_global) {
+    volatile gemm_params_t p;
+    p.lda = k;  p.ldb = k;  p.ldc = ldc_global;
+    int processed = 0;
+
+    int m_full = (m / 8) * 8;
+    if (m_full > 0) {
+        p.m = m_full;  p.k = k;  p.n = n;
+        i8gemm_k_reo_ld(A, B_reo, C, A_reorder, (const gemm_params_t *)&p);
+        processed = m_full;
+    }
+
+    int m_rem = m - processed;
+    if (m_rem == 0) return;
+
+    const i8_t *At = A + (uint64_t)processed * k;
+    i32_t      *Ct = C + (uint64_t)processed * ldc_global;
+    i8_t *A_reo_t  = A_reorder + (uint64_t)processed * k;
+
+    if (m_rem >= 4) {
+        p.m = 4;  p.k = k;  p.n = n;
+        i8gemm_k_reo_ld4(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
+        processed += 4; m_rem -= 4;
+        At = A + (uint64_t)processed * k;
+        Ct = C + (uint64_t)processed * ldc_global;
+        A_reo_t = A_reorder + (uint64_t)processed * k;
+    }
+    if (m_rem >= 2) {
+        p.m = 2;  p.k = k;  p.n = n;
+        i8gemm_k_reo_ld2(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
+        processed += 2; m_rem -= 2;
+        At = A + (uint64_t)processed * k;
+        Ct = C + (uint64_t)processed * ldc_global;
+        A_reo_t = A_reorder + (uint64_t)processed * k;
+    }
+    if (m_rem >= 1) {
+        p.m = 1;  p.k = k;  p.n = n;
+        i8gemm_k_reo_ld1(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // tile_M_i8 — M-tiling: split M rows across threads
 // ═══════════════════════════════════════════════════════════════════════
 static void tile_M_i8(const i8_t *A, const i8_t *B_reo,
                        i32_t *C, int M, int K_r, int N_r,
-                       i8_t *A_reo_pool, int num_threads) {
+                       i8_t *A_reo_pool, int num_threads, int prepacked_a) {
     int M8 = M / 8;
     int M_rem = M - M8 * 8;
     int blocks_per_thread = M8 / num_threads;
@@ -203,8 +341,12 @@ static void tile_M_i8(const i8_t *A, const i8_t *B_reo,
             i32_t      *my_C = C + (uint64_t)my_m_start * N_r;
             i8_t *my_A_reo  = A_reo_pool + (uint64_t)my_m_start * K_r;
 
-            i8_dispatch(my_A, B_reo, my_C, my_m, K_r, N_r,
-                        my_A_reo, /*ldc_global=*/N_r);
+            if (prepacked_a)
+                i8_dispatch_reo(my_A, B_reo, my_C, my_m, K_r, N_r,
+                                my_A_reo, /*ldc_global=*/N_r);
+            else
+                i8_dispatch(my_A, B_reo, my_C, my_m, K_r, N_r,
+                            my_A_reo, /*ldc_global=*/N_r);
         }
     }
 }
@@ -214,7 +356,7 @@ static void tile_M_i8(const i8_t *A, const i8_t *B_reo,
 // ═══════════════════════════════════════════════════════════════════════
 static void tile_N_i8(const i8_t *A, const i8_t *B_reo,
                        i32_t *C, int M, int K_r, int N_r,
-                       i8_t *A_reo_pool, int num_threads) {
+                       i8_t *A_reo_pool, int num_threads, int prepacked_a) {
     int N8 = N_r / 8;
     int blocks_per_thread = N8 / num_threads;
     int extra_blocks       = N8 % num_threads;
@@ -237,16 +379,20 @@ static void tile_N_i8(const i8_t *A, const i8_t *B_reo,
             int my_n       = my_blocks * 8;
             int my_n_start = start_block * 8;
 
-            i8_t *my_A_reo = A_reo_pool +
-                (size_t)tid * (size_t)(M + 8) * (size_t)K_r;
+            i8_t *my_A_reo = prepacked_a ? A_reo_pool :
+                A_reo_pool + (size_t)tid * (size_t)(M + 8) * (size_t)K_r;
             if (my_A_reo) {
                 // B: each N-block = K_r * 8 int8 values (= K_r * 8 bytes)
                 const i8_t *my_B = B_reo + (uint64_t)start_block * K_r * 8;
                 // C: column offset; ldc_global = N_r (full row stride)
                 i32_t *my_C = C + my_n_start;
 
-                i8_dispatch(A, my_B, my_C, M, K_r, my_n,
-                            my_A_reo, /*ldc_global=*/N_r);
+                if (prepacked_a)
+                    i8_dispatch_reo(A, my_B, my_C, M, K_r, my_n,
+                                    my_A_reo, /*ldc_global=*/N_r);
+                else
+                    i8_dispatch(A, my_B, my_C, M, K_r, my_n,
+                                my_A_reo, /*ldc_global=*/N_r);
             }
         }
     }
@@ -269,23 +415,30 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
     const int n_tiles = N_r / 8;
     num_threads = i8_effective_threads(num_threads, M, n_tiles);
     const int use_n_split = i8_use_n_split(M, K_r, N_r, n_tiles, num_threads);
+    const int offline_mode = i8_neon_offline_a_reorder_mode();
+    const int prepack_a = offline_mode > 1 || (offline_mode == 1 && use_n_split);
 
     if (!use_n_split) {
         // M-tiling: one shared A_reorder pool, partitioned by M rows.
         // ld1 tail kernel writes zero-padded q-regs (2× expansion per row);
         // use 2× allocation to avoid overflow for non-multiple-of-8 M.
         i8_t *A_reo_pool = (i8_t *)aligned_alloc_64(
-            (size_t)(M + 8) * K_r * sizeof(i8_t));
+            i8_neon_a_reorder_bytes(M, K_r));
         if (!A_reo_pool) return;
-        tile_M_i8(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads);
+        if (prepack_a)
+            i8_pack_A_neon(A, A_reo_pool, M, K_r, K_r, num_threads);
+        tile_M_i8(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads,
+                  prepack_a);
         free(A_reo_pool);
     } else {
-        // N-tiling: fixed per-thread A_reorder slices avoid malloc/free in workers.
+        size_t copies = prepack_a ? 1u : (size_t)num_threads;
         i8_t *A_reo_pool = (i8_t *)aligned_alloc_64(
-            (size_t)num_threads * (size_t)(M + 8) * (size_t)K_r *
-            sizeof(i8_t));
+            copies * i8_neon_a_reorder_bytes(M, K_r));
         if (!A_reo_pool) return;
-        tile_N_i8(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads);
+        if (prepack_a)
+            i8_pack_A_neon(A, A_reo_pool, M, K_r, K_r, num_threads);
+        tile_N_i8(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads,
+                  prepack_a);
         free(A_reo_pool);
     }
 }
@@ -373,6 +526,18 @@ void i8gemm_k_ld2_f(const i8_t *A, const i8_t *B_reo,
 void i8gemm_k_ld4_f(const i8_t *A, const i8_t *B_reo,
                     f32_t *C, i8_t *A_reorder,
                   const gemm_params_t *params);
+void i8gemm_k_reo_ld_f (const i8_t *A, const i8_t *B_reo,
+                        f32_t *C, i8_t *A_reorder,
+                        const gemm_params_t *params);
+void i8gemm_k_reo_ld1_f(const i8_t *A, const i8_t *B_reo,
+                        f32_t *C, i8_t *A_reorder,
+                        const gemm_params_t *params);
+void i8gemm_k_reo_ld2_f(const i8_t *A, const i8_t *B_reo,
+                        f32_t *C, i8_t *A_reorder,
+                        const gemm_params_t *params);
+void i8gemm_k_reo_ld4_f(const i8_t *A, const i8_t *B_reo,
+                        f32_t *C, i8_t *A_reorder,
+                        const gemm_params_t *params);
 
 // ── i8_dispatch_f — Single-thread fp32 kernel dispatch ─────────────
 static void i8_dispatch_f(const i8_t *A, const i8_t *B_reo,
@@ -418,10 +583,53 @@ static void i8_dispatch_f(const i8_t *A, const i8_t *B_reo,
     }
 }
 
+static void i8_dispatch_reo_f(const i8_t *A, const i8_t *B_reo,
+                              f32_t *C, int m, int k, int n,
+                              i8_t *A_reorder, int ldc_global) {
+    volatile gemm_params_t p;
+    p.lda = k;  p.ldb = k;  p.ldc = ldc_global;
+    int processed = 0;
+
+    int m_full = (m / 8) * 8;
+    if (m_full > 0) {
+        p.m = m_full;  p.k = k;  p.n = n;
+        i8gemm_k_reo_ld_f(A, B_reo, C, A_reorder, (const gemm_params_t *)&p);
+        processed = m_full;
+    }
+
+    int m_rem = m - processed;
+    if (m_rem == 0) return;
+
+    const i8_t *At = A + (uint64_t)processed * k;
+    f32_t      *Ct = C + (uint64_t)processed * ldc_global;
+    i8_t *A_reo_t  = A_reorder + (uint64_t)processed * k;
+
+    if (m_rem >= 4) {
+        p.m = 4;  p.k = k;  p.n = n;
+        i8gemm_k_reo_ld4_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
+        processed += 4; m_rem -= 4;
+        At = A + (uint64_t)processed * k;
+        Ct = C + (uint64_t)processed * ldc_global;
+        A_reo_t = A_reorder + (uint64_t)processed * k;
+    }
+    if (m_rem >= 2) {
+        p.m = 2;  p.k = k;  p.n = n;
+        i8gemm_k_reo_ld2_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
+        processed += 2; m_rem -= 2;
+        At = A + (uint64_t)processed * k;
+        Ct = C + (uint64_t)processed * ldc_global;
+        A_reo_t = A_reorder + (uint64_t)processed * k;
+    }
+    if (m_rem >= 1) {
+        p.m = 1;  p.k = k;  p.n = n;
+        i8gemm_k_reo_ld1_f(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
+    }
+}
+
 // ── tile_M_i8_f — M-tiling for fp32 output ─────────────────────────
 static void tile_M_i8_f(const i8_t *A, const i8_t *B_reo,
                          f32_t *C, int M, int K_r, int N_r,
-                         i8_t *A_reo_pool, int num_threads) {
+                         i8_t *A_reo_pool, int num_threads, int prepacked_a) {
     int M8 = M / 8;
     int M_rem = M - M8 * 8;
     int blocks_per_thread = M8 / num_threads;
@@ -449,8 +657,12 @@ static void tile_M_i8_f(const i8_t *A, const i8_t *B_reo,
             f32_t      *my_C = C + (uint64_t)my_m_start * N_r;
             i8_t *my_A_reo  = A_reo_pool + (uint64_t)my_m_start * K_r;
 
-            i8_dispatch_f(my_A, B_reo, my_C, my_m, K_r, N_r,
-                          my_A_reo, /*ldc_global=*/N_r);
+            if (prepacked_a)
+                i8_dispatch_reo_f(my_A, B_reo, my_C, my_m, K_r, N_r,
+                                  my_A_reo, /*ldc_global=*/N_r);
+            else
+                i8_dispatch_f(my_A, B_reo, my_C, my_m, K_r, N_r,
+                              my_A_reo, /*ldc_global=*/N_r);
         }
     }
 }
@@ -458,7 +670,7 @@ static void tile_M_i8_f(const i8_t *A, const i8_t *B_reo,
 // ── tile_N_i8_f — N-tiling for fp32 output ─────────────────────────
 static void tile_N_i8_f(const i8_t *A, const i8_t *B_reo,
                          f32_t *C, int M, int K_r, int N_r,
-                         i8_t *A_reo_pool, int num_threads) {
+                         i8_t *A_reo_pool, int num_threads, int prepacked_a) {
     int N8 = N_r / 8;
     int blocks_per_thread = N8 / num_threads;
     int extra_blocks       = N8 % num_threads;
@@ -481,14 +693,18 @@ static void tile_N_i8_f(const i8_t *A, const i8_t *B_reo,
             int my_n       = my_blocks * 8;
             int my_n_start = start_block * 8;
 
-            i8_t *my_A_reo = A_reo_pool +
-                (size_t)tid * (size_t)(M + 8) * (size_t)K_r;
+            i8_t *my_A_reo = prepacked_a ? A_reo_pool :
+                A_reo_pool + (size_t)tid * (size_t)(M + 8) * (size_t)K_r;
             if (my_A_reo) {
                 const i8_t *my_B = B_reo + (uint64_t)start_block * K_r * 8;
                 f32_t *my_C = C + my_n_start;
 
-                i8_dispatch_f(A, my_B, my_C, M, K_r, my_n,
-                              my_A_reo, /*ldc_global=*/N_r);
+                if (prepacked_a)
+                    i8_dispatch_reo_f(A, my_B, my_C, M, K_r, my_n,
+                                      my_A_reo, /*ldc_global=*/N_r);
+                else
+                    i8_dispatch_f(A, my_B, my_C, M, K_r, my_n,
+                                  my_A_reo, /*ldc_global=*/N_r);
             }
         }
     }
@@ -501,19 +717,27 @@ void i8gemm_mt_dispatch_f(const i8_t *A, const i8_t *B_reo,
     const int n_tiles = N_r / 8;
     num_threads = i8_effective_threads(num_threads, M, n_tiles);
     const int use_n_split = i8_use_n_split(M, K_r, N_r, n_tiles, num_threads);
+    const int offline_mode = i8_neon_offline_a_reorder_mode();
+    const int prepack_a = offline_mode > 1 || (offline_mode == 1 && use_n_split);
 
     if (!use_n_split) {
         i8_t *A_reo_pool = (i8_t *)aligned_alloc_64(
-            (size_t)(M + 8) * K_r * sizeof(i8_t));
+            i8_neon_a_reorder_bytes(M, K_r));
         if (!A_reo_pool) return;
-        tile_M_i8_f(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads);
+        if (prepack_a)
+            i8_pack_A_neon(A, A_reo_pool, M, K_r, K_r, num_threads);
+        tile_M_i8_f(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads,
+                    prepack_a);
         free(A_reo_pool);
     } else {
+        size_t copies = prepack_a ? 1u : (size_t)num_threads;
         i8_t *A_reo_pool = (i8_t *)aligned_alloc_64(
-            (size_t)num_threads * (size_t)(M + 8) * (size_t)K_r *
-            sizeof(i8_t));
+            copies * i8_neon_a_reorder_bytes(M, K_r));
         if (!A_reo_pool) return;
-        tile_N_i8_f(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads);
+        if (prepack_a)
+            i8_pack_A_neon(A, A_reo_pool, M, K_r, K_r, num_threads);
+        tile_N_i8_f(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads,
+                    prepack_a);
         free(A_reo_pool);
     }
 }
@@ -600,6 +824,22 @@ void i8gemm_k_ld4_bias_f(const i8_t *A, const i8_t *B_reo,
                           f32_t *C, i8_t *A_reorder,
                           const gemm_params_t *params,
                           const f32_t *bias);
+void i8gemm_k_reo_ld_bias_f (const i8_t *A, const i8_t *B_reo,
+                              f32_t *C, i8_t *A_reorder,
+                              const gemm_params_t *params,
+                              const f32_t *bias);
+void i8gemm_k_reo_ld1_bias_f(const i8_t *A, const i8_t *B_reo,
+                              f32_t *C, i8_t *A_reorder,
+                              const gemm_params_t *params,
+                              const f32_t *bias);
+void i8gemm_k_reo_ld2_bias_f(const i8_t *A, const i8_t *B_reo,
+                              f32_t *C, i8_t *A_reorder,
+                              const gemm_params_t *params,
+                              const f32_t *bias);
+void i8gemm_k_reo_ld4_bias_f(const i8_t *A, const i8_t *B_reo,
+                              f32_t *C, i8_t *A_reorder,
+                              const gemm_params_t *params,
+                              const f32_t *bias);
 
 // ── i8_dispatch_bias_f — Single-thread bias kernel dispatch ───────────
 static void i8_dispatch_bias_f(const i8_t *A, const i8_t *B_reo,
@@ -646,11 +886,59 @@ static void i8_dispatch_bias_f(const i8_t *A, const i8_t *B_reo,
     }
 }
 
+static void i8_dispatch_reo_bias_f(const i8_t *A, const i8_t *B_reo,
+                                   f32_t *C, int m, int k, int n,
+                                   i8_t *A_reorder, int ldc_global,
+                                   const f32_t *bias) {
+    volatile gemm_params_t p;
+    p.lda = k;  p.ldb = k;  p.ldc = ldc_global;
+    int processed = 0;
+
+    int m_full = (m / 8) * 8;
+    if (m_full > 0) {
+        p.m = m_full;  p.k = k;  p.n = n;
+        i8gemm_k_reo_ld_bias_f(A, B_reo, C, A_reorder,
+                               (const gemm_params_t *)&p, bias);
+        processed = m_full;
+    }
+
+    int m_rem = m - processed;
+    if (m_rem == 0) return;
+
+    const i8_t *At = A + (uint64_t)processed * k;
+    f32_t      *Ct = C + (uint64_t)processed * ldc_global;
+    i8_t *A_reo_t  = A_reorder + (uint64_t)processed * k;
+
+    if (m_rem >= 4) {
+        p.m = 4;  p.k = k;  p.n = n;
+        i8gemm_k_reo_ld4_bias_f(At, B_reo, Ct, A_reo_t,
+                                (const gemm_params_t *)&p, bias);
+        processed += 4; m_rem -= 4;
+        At = A + (uint64_t)processed * k;
+        Ct = C + (uint64_t)processed * ldc_global;
+        A_reo_t = A_reorder + (uint64_t)processed * k;
+    }
+    if (m_rem >= 2) {
+        p.m = 2;  p.k = k;  p.n = n;
+        i8gemm_k_reo_ld2_bias_f(At, B_reo, Ct, A_reo_t,
+                                (const gemm_params_t *)&p, bias);
+        processed += 2; m_rem -= 2;
+        At = A + (uint64_t)processed * k;
+        Ct = C + (uint64_t)processed * ldc_global;
+        A_reo_t = A_reorder + (uint64_t)processed * k;
+    }
+    if (m_rem >= 1) {
+        p.m = 1;  p.k = k;  p.n = n;
+        i8gemm_k_reo_ld1_bias_f(At, B_reo, Ct, A_reo_t,
+                                (const gemm_params_t *)&p, bias);
+    }
+}
+
 // ── tile_M_i8_bias_f — M-tiling for bias fp32 output ──────────────────
 static void tile_M_i8_bias_f(const i8_t *A, const i8_t *B_reo,
                               f32_t *C, int M, int K_r, int N_r,
                               i8_t *A_reo_pool, int num_threads,
-                              const f32_t *bias) {
+                              const f32_t *bias, int prepacked_a) {
     int M8 = M / 8;
     int M_rem = M - M8 * 8;
     int blocks_per_thread = M8 / num_threads;
@@ -678,8 +966,12 @@ static void tile_M_i8_bias_f(const i8_t *A, const i8_t *B_reo,
             f32_t      *my_C = C + (uint64_t)my_m_start * N_r;
             i8_t *my_A_reo  = A_reo_pool + (uint64_t)my_m_start * K_r;
 
-            i8_dispatch_bias_f(my_A, B_reo, my_C, my_m, K_r, N_r,
-                               my_A_reo, /*ldc_global=*/N_r, bias);
+            if (prepacked_a)
+                i8_dispatch_reo_bias_f(my_A, B_reo, my_C, my_m, K_r, N_r,
+                                       my_A_reo, /*ldc_global=*/N_r, bias);
+            else
+                i8_dispatch_bias_f(my_A, B_reo, my_C, my_m, K_r, N_r,
+                                   my_A_reo, /*ldc_global=*/N_r, bias);
         }
     }
 }
@@ -688,7 +980,7 @@ static void tile_M_i8_bias_f(const i8_t *A, const i8_t *B_reo,
 static void tile_N_i8_bias_f(const i8_t *A, const i8_t *B_reo,
                               f32_t *C, int M, int K_r, int N_r,
                               i8_t *A_reo_pool, int num_threads,
-                              const f32_t *bias) {
+                              const f32_t *bias, int prepacked_a) {
     int N8 = N_r / 8;
     int blocks_per_thread = N8 / num_threads;
     int extra_blocks       = N8 % num_threads;
@@ -711,15 +1003,20 @@ static void tile_N_i8_bias_f(const i8_t *A, const i8_t *B_reo,
             int my_n       = my_blocks * 8;
             int my_n_start = start_block * 8;
 
-            i8_t *my_A_reo = A_reo_pool +
-                (size_t)tid * (size_t)(M + 8) * (size_t)K_r;
+            i8_t *my_A_reo = prepacked_a ? A_reo_pool :
+                A_reo_pool + (size_t)tid * (size_t)(M + 8) * (size_t)K_r;
             if (my_A_reo) {
                 const i8_t   *my_B   = B_reo + (uint64_t)start_block * K_r * 8;
                 f32_t        *my_C   = C + my_n_start;
                 const f32_t  *my_bias = bias + my_n_start;
 
-                i8_dispatch_bias_f(A, my_B, my_C, M, K_r, my_n,
-                                   my_A_reo, /*ldc_global=*/N_r, my_bias);
+                if (prepacked_a)
+                    i8_dispatch_reo_bias_f(A, my_B, my_C, M, K_r, my_n,
+                                           my_A_reo, /*ldc_global=*/N_r,
+                                           my_bias);
+                else
+                    i8_dispatch_bias_f(A, my_B, my_C, M, K_r, my_n,
+                                       my_A_reo, /*ldc_global=*/N_r, my_bias);
             }
         }
     }
@@ -732,21 +1029,27 @@ void i8gemm_mt_dispatch_bias_f(const i8_t *A, const i8_t *B_reo,
     const int n_tiles = N_r / 8;
     num_threads = i8_effective_threads(num_threads, M, n_tiles);
     const int use_n_split = i8_use_n_split(M, K_r, N_r, n_tiles, num_threads);
+    const int offline_mode = i8_neon_offline_a_reorder_mode();
+    const int prepack_a = offline_mode > 1 || (offline_mode == 1 && use_n_split);
 
     if (!use_n_split) {
         i8_t *A_reo_pool = (i8_t *)aligned_alloc_64(
-            (size_t)(M + 8) * K_r * sizeof(i8_t));
+            i8_neon_a_reorder_bytes(M, K_r));
         if (!A_reo_pool) return;
+        if (prepack_a)
+            i8_pack_A_neon(A, A_reo_pool, M, K_r, K_r, num_threads);
         tile_M_i8_bias_f(A, B_reo, C, M, K_r, N_r, A_reo_pool,
-                          num_threads, bias);
+                          num_threads, bias, prepack_a);
         free(A_reo_pool);
     } else {
+        size_t copies = prepack_a ? 1u : (size_t)num_threads;
         i8_t *A_reo_pool = (i8_t *)aligned_alloc_64(
-            (size_t)num_threads * (size_t)(M + 8) * (size_t)K_r *
-            sizeof(i8_t));
+            copies * i8_neon_a_reorder_bytes(M, K_r));
         if (!A_reo_pool) return;
+        if (prepack_a)
+            i8_pack_A_neon(A, A_reo_pool, M, K_r, K_r, num_threads);
         tile_N_i8_bias_f(A, B_reo, C, M, K_r, N_r, A_reo_pool,
-                         num_threads, bias);
+                         num_threads, bias, prepack_a);
         free(A_reo_pool);
     }
 }

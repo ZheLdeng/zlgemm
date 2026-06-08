@@ -75,6 +75,18 @@ static int bf16_use_n_split(int M, int K_r, int N_r, int n_tiles,
 
     if (num_threads <= 1 || n_tiles < num_threads)
         return 0;
+
+    /*
+     * 80c opt-parts data shows high-thread NEON BF16 large-M cases often do
+     * better with M splitting.  N splitting partitions B, but it can make each
+     * thread sweep a thin M shard and exposes online A pack / C-store overhead.
+     * Keep N splitting for very wide-N cases via the rule below.
+     */
+    if (num_threads >= 16 && M >= 512 && K_r >= 512 && N_r <= M * 4)
+        return 0;
+    if (num_threads >= 16 && M >= 128 && K_r >= 2048 && N_r <= 1024)
+        return 0;
+
     if (M / 8 < num_threads)
         return 1;
 

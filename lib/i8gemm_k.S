@@ -74,6 +74,12 @@
 301:
 	.endm
 
+	.macro ADVANCE_PREPACKED_A_0
+	add  A_REORDER, A_REORDER, K, lsl #3
+	.endm
+	.macro ADVANCE_PREPACKED_A_1
+	.endm
+
 // ── INIT / RESTORE ────────────────────────────────────────────
 	.macro INIT
 	stp x19, x20, [sp, #-16]!
@@ -992,7 +998,7 @@
 //   \c_adv      : C 列前进字节数（32 = 8×int32）
 // ════════════════════════════════════════════════════════════════════
 
-	.macro GEMM_BODY func_name, mrows, cmpsfx, load_c, store_c, ldc_shift, c_adv
+	.macro GEMM_BODY func_name, mrows, cmpsfx, load_c, store_c, ldc_shift, c_adv, first_n
 
 #ifdef __APPLE__
 	.global _\func_name
@@ -1020,7 +1026,7 @@ _\func_name:
 	M_LOOP_BEGIN_\mrows
 
 	mov  A_REORDER_M, A_REORDER
-	mov  FIRST_N, #1
+	mov  FIRST_N, #\first_n
 	mov  C_N_BASE, C_ROW_BASE
 	mov  B_N_BASE, B_ADDR
 
@@ -1098,6 +1104,7 @@ _\func_name:
 	subs N_COUNT, N_COUNT, #1
 	b.gt .L\func_name\()_n_iter
 
+	ADVANCE_PREPACKED_A_\first_n
 	M_LOOP_END_\mrows
 
 .L\func_name\()_end:
@@ -1111,15 +1118,26 @@ _\func_name:
 // ════════════════════════════════════════════════════════════════════
 
 // 主内核 (m=8)
-GEMM_BODY i8gemm_k_ld,  8, 8, LOAD_C_ROWMAJOR, STORE_C_ROWMAJOR, 2, 32
+GEMM_BODY i8gemm_k_ld,  8, 8, LOAD_C_ROWMAJOR, STORE_C_ROWMAJOR, 2, 32, 1
 
 // 尾部内核 (m=1,2,4)
-GEMM_BODY i8gemm_k_ld1, 1, 2, LOAD_C_1,        STORE_C_1,        2, 32
-GEMM_BODY i8gemm_k_ld2, 2, 2, LOAD_C_2,        STORE_C_2,        2, 32
-GEMM_BODY i8gemm_k_ld4, 4, 4, LOAD_C_4,        STORE_C_4,        2, 32
+GEMM_BODY i8gemm_k_ld1, 1, 2, LOAD_C_1,        STORE_C_1,        2, 32, 1
+GEMM_BODY i8gemm_k_ld2, 2, 2, LOAD_C_2,        STORE_C_2,        2, 32, 1
+GEMM_BODY i8gemm_k_ld4, 4, 4, LOAD_C_4,        STORE_C_4,        2, 32, 1
 
 // fp32 store variants (_f suffix)
-GEMM_BODY i8gemm_k_ld_f,  8, 8, LOAD_C_ROWMAJOR_F, STORE_C_ROWMAJOR_F, 2, 32
-GEMM_BODY i8gemm_k_ld1_f, 1, 2, LOAD_C_1_F,        STORE_C_1_F,        2, 32
-GEMM_BODY i8gemm_k_ld2_f, 2, 2, LOAD_C_2_F,        STORE_C_2_F,        2, 32
-GEMM_BODY i8gemm_k_ld4_f, 4, 4, LOAD_C_4_F,        STORE_C_4_F,        2, 32
+GEMM_BODY i8gemm_k_ld_f,  8, 8, LOAD_C_ROWMAJOR_F, STORE_C_ROWMAJOR_F, 2, 32, 1
+GEMM_BODY i8gemm_k_ld1_f, 1, 2, LOAD_C_1_F,        STORE_C_1_F,        2, 32, 1
+GEMM_BODY i8gemm_k_ld2_f, 2, 2, LOAD_C_2_F,        STORE_C_2_F,        2, 32, 1
+GEMM_BODY i8gemm_k_ld4_f, 4, 4, LOAD_C_4_F,        STORE_C_4_F,        2, 32, 1
+
+// Prepacked-A variants: start directly from cached A_reorder.
+GEMM_BODY i8gemm_k_reo_ld,  8, 8, LOAD_C_ROWMAJOR, STORE_C_ROWMAJOR, 2, 32, 0
+GEMM_BODY i8gemm_k_reo_ld1, 1, 2, LOAD_C_1,        STORE_C_1,        2, 32, 0
+GEMM_BODY i8gemm_k_reo_ld2, 2, 2, LOAD_C_2,        STORE_C_2,        2, 32, 0
+GEMM_BODY i8gemm_k_reo_ld4, 4, 4, LOAD_C_4,        STORE_C_4,        2, 32, 0
+
+GEMM_BODY i8gemm_k_reo_ld_f,  8, 8, LOAD_C_ROWMAJOR_F, STORE_C_ROWMAJOR_F, 2, 32, 0
+GEMM_BODY i8gemm_k_reo_ld1_f, 1, 2, LOAD_C_1_F,        STORE_C_1_F,        2, 32, 0
+GEMM_BODY i8gemm_k_reo_ld2_f, 2, 2, LOAD_C_2_F,        STORE_C_2_F,        2, 32, 0
+GEMM_BODY i8gemm_k_reo_ld4_f, 4, 4, LOAD_C_4_F,        STORE_C_4_F,        2, 32, 0

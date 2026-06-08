@@ -74,7 +74,14 @@ static int i8_sve_use_n_split(int M, int K_r, int N_r, int n_tiles,
             return n_tiles >= num_threads;
     }
 
-    if (num_threads <= 1 || n_tiles < num_threads)
+    if (num_threads <= 1) {
+        if (M >= 64 && n_tiles > 1 &&
+            (K_r >= 1024 || M >= 128 || N_r >= 2048))
+            return 1;
+        return 0;
+    }
+
+    if (n_tiles < num_threads)
         return 0;
     if (M / 8 < num_threads)
         return 1;
@@ -106,12 +113,22 @@ void i8_pack_B(const i8_t *B, i8_t *B_reo, int K, int N) {
 
 void i8gemm_k_ld(const i8_t *A, const i8_t *B_reo, i32_t *C,
                  i8_t *A_reorder, const gemm_params_t *params);
+void i8gemm_k_nld(const i8_t *A, const i8_t *B_reo, i32_t *C,
+                  i8_t *A_reorder, const gemm_params_t *params);
+void i8gemm_k_nld_m12(const i8_t *A, const i8_t *B_reo, i32_t *C,
+                      i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_ld1(const i8_t *A, const i8_t *B_reo, i32_t *C,
                   i8_t *A_reorder, const gemm_params_t *params);
+void i8gemm_k_nld1(const i8_t *A, const i8_t *B_reo, i32_t *C,
+                   i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_ld2(const i8_t *A, const i8_t *B_reo, i32_t *C,
                   i8_t *A_reorder, const gemm_params_t *params);
+void i8gemm_k_nld2(const i8_t *A, const i8_t *B_reo, i32_t *C,
+                   i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_ld4(const i8_t *A, const i8_t *B_reo, i32_t *C,
                   i8_t *A_reorder, const gemm_params_t *params);
+void i8gemm_k_nld4(const i8_t *A, const i8_t *B_reo, i32_t *C,
+                   i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_ld_f(const i8_t *A, const i8_t *B_reo, f32_t *C,
                    i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_ld1_f(const i8_t *A, const i8_t *B_reo, f32_t *C,
@@ -132,21 +149,160 @@ void i8gemm_k_ld2_bias_f(const i8_t *A, const i8_t *B_reo, f32_t *C,
 void i8gemm_k_ld4_bias_f(const i8_t *A, const i8_t *B_reo, f32_t *C,
                          i8_t *A_reorder, const gemm_params_t *params,
                          const f32_t *bias);
+void i8_pack_A_neon_m8_asm(const i8_t *A, i8_t *P, int K_r, int lda);
+
+static size_t i8_a_reorder_stride(int K_r) {
+    return (size_t)K_r * 8u;
+}
+
+static size_t i8_a_reorder_stride_m12(int K_r) {
+    return (size_t)K_r * 12u;
+}
+
+static int i8_use_a_reorder_for_shape(int K_r, int n_tiles) {
+    const char *env = getenv("I8_SVE_NO_A_REORDER");
+    if (env && atoi(env) != 0)
+        return 0;
+    return K_r >= 64 && n_tiles > 1;
+}
+
+static int i8_use_m12_for_shape(int M, int K_r, int n_tiles) {
+    const char *env = getenv("I8_SVE_NO_M12");
+    if (env && atoi(env) != 0)
+        return 0;
+    return M >= 12 && K_r >= 64 && n_tiles > 1;
+}
+
+static void i8_pack_A_sve_block(const i8_t *A, i8_t *A_reo,
+                                int M, int K_r) {
+    if (M == 8) {
+        i8_pack_A_neon_m8_asm(A, A_reo, K_r, K_r);
+        return;
+    }
+
+    size_t idx = 0;
+    for (int kb = 0; kb < K_r; kb += 8) {
+        for (int rp = 0; rp < 4; rp++) {
+            int r0 = rp * 2;
+            int r1 = r0 + 1;
+            if (r0 < M)
+                memcpy(A_reo + idx, A + (size_t)r0 * K_r + kb, 8);
+            else
+                memset(A_reo + idx, 0, 8);
+            idx += 8;
+            if (r1 < M)
+                memcpy(A_reo + idx, A + (size_t)r1 * K_r + kb, 8);
+            else
+                memset(A_reo + idx, 0, 8);
+            idx += 8;
+        }
+    }
+}
+
+static void i8_pack_A_sve_m12_block(const i8_t *A, i8_t *A_reo,
+                                    int K_r) {
+    size_t idx = 0;
+    for (int kb = 0; kb < K_r; kb += 8) {
+        for (int rp = 0; rp < 6; rp++) {
+            int r0 = rp * 2;
+            int r1 = r0 + 1;
+            memcpy(A_reo + idx, A + (size_t)r0 * K_r + kb, 8);
+            idx += 8;
+            memcpy(A_reo + idx, A + (size_t)r1 * K_r + kb, 8);
+            idx += 8;
+        }
+    }
+}
+
+static i8_t *i8_prepare_A_reorder_pool(const i8_t *A, int M, int K_r,
+                                       int num_threads) {
+    const int blocks = (M + 7) / 8;
+    const size_t stride = i8_a_reorder_stride(K_r);
+    i8_t *pool = (i8_t *)aligned_alloc_64((size_t)blocks * stride);
+    if (!pool)
+        return NULL;
+
+    #pragma omp parallel for num_threads(num_threads) schedule(static)
+    for (int b = 0; b < blocks; b++) {
+        int m0 = b * 8;
+        int mb = M - m0 < 8 ? M - m0 : 8;
+        i8_pack_A_sve_block(A + (size_t)m0 * K_r,
+                            pool + (size_t)b * stride, mb, K_r);
+    }
+    return pool;
+}
+
+static i8_t *i8_prepare_A_reorder_pool_m12(const i8_t *A, int M, int K_r,
+                                           int num_threads) {
+    const int blocks = M / 12;
+    const size_t stride = i8_a_reorder_stride_m12(K_r);
+    i8_t *pool = (i8_t *)aligned_alloc_64((size_t)blocks * stride);
+    if (!pool)
+        return NULL;
+
+    #pragma omp parallel for num_threads(num_threads) schedule(static)
+    for (int b = 0; b < blocks; b++) {
+        i8_pack_A_sve_m12_block(A + (size_t)b * 12u * K_r,
+                                pool + (size_t)b * stride, K_r);
+    }
+    return pool;
+}
 
 static void i8_dispatch_i32(const i8_t *A, const i8_t *B_reo, i32_t *C,
-                            int M, int K_r, int N_r, int ldc) {
+                            int M, int K_r, int N_r, int ldc,
+                            int no_load, i8_t *A_reorder) {
     gemm_params_t p = {M, K_r, N_r, K_r, K_r, ldc};
-    i8gemm_k_ld(A, B_reo, C, NULL, &p);
+    if (no_load) {
+        if (M <= 1)
+            i8gemm_k_nld1(A, B_reo, C, A_reorder, &p);
+        else if (M <= 2)
+            i8gemm_k_nld2(A, B_reo, C, A_reorder, &p);
+        else if (M <= 4)
+            i8gemm_k_nld4(A, B_reo, C, A_reorder, &p);
+        else
+            i8gemm_k_nld(A, B_reo, C, A_reorder, &p);
+    } else {
+        if (M <= 1)
+            i8gemm_k_ld1(A, B_reo, C, A_reorder, &p);
+        else if (M <= 2)
+            i8gemm_k_ld2(A, B_reo, C, A_reorder, &p);
+        else if (M <= 4)
+            i8gemm_k_ld4(A, B_reo, C, A_reorder, &p);
+        else
+            i8gemm_k_ld(A, B_reo, C, A_reorder, &p);
+    }
+}
+
+static void i8_dispatch_i32_m12(const i8_t *A, const i8_t *B_reo, i32_t *C,
+                                int K_r, int N_r, int ldc,
+                                i8_t *A_reorder) {
+    gemm_params_t p = {12, K_r, N_r, K_r, K_r, ldc};
+    i8gemm_k_nld_m12(A, B_reo, C, A_reorder, &p);
 }
 
 static void i8_dispatch_f32(const i8_t *A, const i8_t *B_reo, f32_t *C,
                             int M, int K_r, int N_r, int ldc,
-                            const f32_t *bias) {
+                            const f32_t *bias, i8_t *A_reorder) {
     gemm_params_t p = {M, K_r, N_r, K_r, K_r, ldc};
-    if (bias)
-        i8gemm_k_ld_bias_f(A, B_reo, C, NULL, &p, bias);
-    else
-        i8gemm_k_ld_f(A, B_reo, C, NULL, &p);
+    if (bias) {
+        if (M <= 1)
+            i8gemm_k_ld1_bias_f(A, B_reo, C, A_reorder, &p, bias);
+        else if (M <= 2)
+            i8gemm_k_ld2_bias_f(A, B_reo, C, A_reorder, &p, bias);
+        else if (M <= 4)
+            i8gemm_k_ld4_bias_f(A, B_reo, C, A_reorder, &p, bias);
+        else
+            i8gemm_k_ld_bias_f(A, B_reo, C, A_reorder, &p, bias);
+    } else {
+        if (M <= 1)
+            i8gemm_k_ld1_f(A, B_reo, C, A_reorder, &p);
+        else if (M <= 2)
+            i8gemm_k_ld2_f(A, B_reo, C, A_reorder, &p);
+        else if (M <= 4)
+            i8gemm_k_ld4_f(A, B_reo, C, A_reorder, &p);
+        else
+            i8gemm_k_ld_f(A, B_reo, C, A_reorder, &p);
+    }
 }
 
 void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
@@ -157,22 +313,85 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
     num_threads = i8_sve_effective_threads(num_threads, M, n_tiles);
     const int use_n_split =
         i8_sve_use_n_split(M, K_r, N_r, n_tiles, num_threads);
+    const int use_a_reorder = i8_use_a_reorder_for_shape(K_r, n_tiles);
+    const size_t a_stride = i8_a_reorder_stride(K_r);
+    const int use_m12 = use_a_reorder && i8_use_m12_for_shape(M, K_r, n_tiles);
+    const int m12_blocks = use_m12 ? M / 12 : 0;
+    const int m12_rows = m12_blocks * 12;
+    const int tail_M = M - m12_rows;
+    const size_t a_stride_m12 = i8_a_reorder_stride_m12(K_r);
+    i8_t *A_reo_m12_pool = use_m12 ?
+        i8_prepare_A_reorder_pool_m12(A, m12_rows, K_r, num_threads) : NULL;
+    i8_t *A_reo_tail_pool = use_a_reorder && tail_M > 0 ?
+        i8_prepare_A_reorder_pool(A + (size_t)m12_rows * K_r,
+                                  tail_M, K_r, num_threads) : NULL;
+    i8_t *A_reo_pool = use_a_reorder && !use_m12 ?
+        i8_prepare_A_reorder_pool(A, M, K_r, num_threads) : NULL;
 
     if (!use_n_split) {
-        #pragma omp parallel for num_threads(num_threads) schedule(static)
-        for (int m0 = 0; m0 < M; m0 += 8) {
-            int mb = M - m0 < 8 ? M - m0 : 8;
-            i8_dispatch_i32(A + (size_t)m0 * K_r, B_reo,
-                            C + (size_t)m0 * N_r, mb, K_r, N_r, N_r);
+        if (use_m12) {
+            #pragma omp parallel for num_threads(num_threads) schedule(static)
+            for (int b = 0; b < m12_blocks; b++) {
+                int m0 = b * 12;
+                i8_dispatch_i32_m12(A + (size_t)m0 * K_r, B_reo,
+                                    C + (size_t)m0 * N_r,
+                                    K_r, N_r, N_r,
+                                    A_reo_m12_pool + (size_t)b * a_stride_m12);
+            }
+
+            #pragma omp parallel for num_threads(num_threads) schedule(static)
+            for (int m0 = m12_rows; m0 < M; m0 += 8) {
+                int rel_m = m0 - m12_rows;
+                int mb = M - m0 < 8 ? M - m0 : 8;
+                i8_t *A_reo = A_reo_tail_pool ?
+                    A_reo_tail_pool + (size_t)(rel_m / 8) * a_stride : NULL;
+                i8_dispatch_i32(A + (size_t)m0 * K_r, B_reo,
+                                C + (size_t)m0 * N_r, mb, K_r, N_r, N_r,
+                                1, A_reo);
+            }
+        } else {
+            #pragma omp parallel for num_threads(num_threads) schedule(static)
+            for (int m0 = 0; m0 < M; m0 += 8) {
+                int mb = M - m0 < 8 ? M - m0 : 8;
+                i8_t *A_reo = A_reo_pool ?
+                    A_reo_pool + (size_t)(m0 / 8) * a_stride : NULL;
+                i8_dispatch_i32(A + (size_t)m0 * K_r, B_reo,
+                                C + (size_t)m0 * N_r, mb, K_r, N_r, N_r,
+                                1, A_reo);
+            }
         }
     } else {
         #pragma omp parallel for num_threads(num_threads) schedule(static)
         for (int t = 0; t < n_tiles; t++) {
             int n0 = t * n_tile;
-            i8_dispatch_i32(A, B_reo + (size_t)t * K_r * n_tile,
-                            C + n0, M, K_r, n_tile, N_r);
+            const i8_t *B_tile = B_reo + (size_t)t * K_r * n_tile;
+            if (use_m12) {
+                for (int b = 0; b < m12_blocks; b++) {
+                    int m0 = b * 12;
+                    i8_dispatch_i32_m12(A + (size_t)m0 * K_r, B_tile,
+                                        C + (size_t)m0 * N_r + n0,
+                                        K_r, n_tile, N_r,
+                                        A_reo_m12_pool + (size_t)b * a_stride_m12);
+                }
+                for (int m0 = m12_rows; m0 < M; m0 += 8) {
+                    int rel_m = m0 - m12_rows;
+                    int mb = M - m0 < 8 ? M - m0 : 8;
+                    i8_t *A_reo = A_reo_tail_pool ?
+                        A_reo_tail_pool + (size_t)(rel_m / 8) * a_stride : NULL;
+                    i8_dispatch_i32(A + (size_t)m0 * K_r, B_tile,
+                                    C + (size_t)m0 * N_r + n0,
+                                    mb, K_r, n_tile, N_r, 1, A_reo);
+                }
+            } else {
+                i8_dispatch_i32(A, B_tile, C + n0, M, K_r, n_tile,
+                                N_r, 1, A_reo_pool);
+            }
         }
     }
+
+    free(A_reo_m12_pool);
+    free(A_reo_tail_pool);
+    free(A_reo_pool);
 }
 
 void i8gemm_mt_dispatch_f(const i8_t *A, const i8_t *B_reo,
@@ -183,22 +402,31 @@ void i8gemm_mt_dispatch_f(const i8_t *A, const i8_t *B_reo,
     num_threads = i8_sve_effective_threads(num_threads, M, n_tiles);
     const int use_n_split =
         i8_sve_use_n_split(M, K_r, N_r, n_tiles, num_threads);
+    const int use_a_reorder = i8_use_a_reorder_for_shape(K_r, n_tiles);
+    const size_t a_stride = i8_a_reorder_stride(K_r);
+    i8_t *A_reo_pool = use_a_reorder ?
+        i8_prepare_A_reorder_pool(A, M, K_r, num_threads) : NULL;
 
     if (!use_n_split) {
         #pragma omp parallel for num_threads(num_threads) schedule(static)
         for (int m0 = 0; m0 < M; m0 += 8) {
             int mb = M - m0 < 8 ? M - m0 : 8;
+            i8_t *A_reo = A_reo_pool ?
+                A_reo_pool + (size_t)(m0 / 8) * a_stride : NULL;
             i8_dispatch_f32(A + (size_t)m0 * K_r, B_reo,
-                            C + (size_t)m0 * N_r, mb, K_r, N_r, N_r, NULL);
+                            C + (size_t)m0 * N_r, mb, K_r, N_r, N_r, NULL,
+                            A_reo);
         }
     } else {
         #pragma omp parallel for num_threads(num_threads) schedule(static)
         for (int t = 0; t < n_tiles; t++) {
             int n0 = t * n_tile;
             i8_dispatch_f32(A, B_reo + (size_t)t * K_r * n_tile,
-                            C + n0, M, K_r, n_tile, N_r, NULL);
+                            C + n0, M, K_r, n_tile, N_r, NULL, A_reo_pool);
         }
     }
+
+    free(A_reo_pool);
 }
 
 void i8gemm_mt_dispatch_bias_f(const i8_t *A, const i8_t *B_reo,
@@ -209,22 +437,32 @@ void i8gemm_mt_dispatch_bias_f(const i8_t *A, const i8_t *B_reo,
     num_threads = i8_sve_effective_threads(num_threads, M, n_tiles);
     const int use_n_split =
         i8_sve_use_n_split(M, K_r, N_r, n_tiles, num_threads);
+    const int use_a_reorder = i8_use_a_reorder_for_shape(K_r, n_tiles);
+    const size_t a_stride = i8_a_reorder_stride(K_r);
+    i8_t *A_reo_pool = use_a_reorder ?
+        i8_prepare_A_reorder_pool(A, M, K_r, num_threads) : NULL;
 
     if (!use_n_split) {
         #pragma omp parallel for num_threads(num_threads) schedule(static)
         for (int m0 = 0; m0 < M; m0 += 8) {
             int mb = M - m0 < 8 ? M - m0 : 8;
+            i8_t *A_reo = A_reo_pool ?
+                A_reo_pool + (size_t)(m0 / 8) * a_stride : NULL;
             i8_dispatch_f32(A + (size_t)m0 * K_r, B_reo,
-                            C + (size_t)m0 * N_r, mb, K_r, N_r, N_r, bias);
+                            C + (size_t)m0 * N_r, mb, K_r, N_r, N_r, bias,
+                            A_reo);
         }
     } else {
         #pragma omp parallel for num_threads(num_threads) schedule(static)
         for (int t = 0; t < n_tiles; t++) {
             int n0 = t * n_tile;
             i8_dispatch_f32(A, B_reo + (size_t)t * K_r * n_tile,
-                            C + n0, M, K_r, n_tile, N_r, bias + n0);
+                            C + n0, M, K_r, n_tile, N_r, bias + n0,
+                            A_reo_pool);
         }
     }
+
+    free(A_reo_pool);
 }
 
 static int i8_prepare(const i8_t *A_orig, const i8_t *B_orig,
