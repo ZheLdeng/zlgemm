@@ -64,7 +64,7 @@ static void fill_bias(float *bias, int n) {
         bias[i] = (float)((i % 17) - 8) * 0.0625f;
 }
 
-static void pack_a8(const uint16_t *A, uint16_t *P, int M, int K) {
+static void pack_a8(const uint16_t *A, uint16_t *P, int M, int K, int lda) {
     size_t idx = 0;
     for (int mb = 0; mb < M; mb += 8) {
         for (int kb = 0; kb < K; kb += 4) {
@@ -72,9 +72,9 @@ static void pack_a8(const uint16_t *A, uint16_t *P, int M, int K) {
                 int r0 = mb + rp * 2;
                 int r1 = r0 + 1;
                 for (int k = 0; k < 4; k++)
-                    P[idx++] = A[(size_t)r0 * K + kb + k];
+                    P[idx++] = A[(size_t)r0 * lda + kb + k];
                 for (int k = 0; k < 4; k++)
-                    P[idx++] = A[(size_t)r1 * K + kb + k];
+                    P[idx++] = A[(size_t)r1 * lda + kb + k];
             }
         }
     }
@@ -149,9 +149,9 @@ static void run_kernel_mt(const char *mode, const uint16_t *A, const uint16_t *B
 }
 
 int main(int argc, char **argv) {
-    if (argc != 8 && argc != 9 && argc != 10) {
+    if (argc < 8 || argc > 12) {
         fprintf(stderr,
-                "usage: %s variant M K N reps warmup runs [f32|bf16|bias] [threads]\n",
+                "usage: %s variant M K N reps warmup runs [f32|bf16|bias] [threads] [stride_factor] [batch_count]\n",
                 argv[0]);
         return 2;
     }
@@ -164,7 +164,9 @@ int main(int argc, char **argv) {
     int warmup = atoi(argv[6]);
     int runs = atoi(argv[7]);
     const char *mode = argc >= 9 ? argv[8] : "f32";
-    int threads = argc == 10 ? atoi(argv[9]) : 1;
+    int threads = argc >= 10 ? atoi(argv[9]) : 1;
+    int stride_factor = argc >= 11 ? atoi(argv[10]) : 1;
+    int batch_count = argc >= 12 ? atoi(argv[11]) : 1;
     if (strcmp(mode, "f32") != 0 && strcmp(mode, "bf16") != 0 &&
         strcmp(mode, "bias") != 0) {
         fprintf(stderr, "bad mode: %s\n", mode);
@@ -174,51 +176,87 @@ int main(int argc, char **argv) {
         fprintf(stderr, "bad threads: %d\n", threads);
         return 2;
     }
+    if (stride_factor < 1) {
+        fprintf(stderr, "bad stride_factor: %d\n", stride_factor);
+        return 2;
+    }
+    if (batch_count < 1) {
+        fprintf(stderr, "bad batch_count: %d\n", batch_count);
+        return 2;
+    }
     if (M % 8 != 0) {
         fprintf(stderr, "M must be a multiple of 8 for this M8 bench: %d\n", M);
         return 2;
     }
 
     const double peak_gflops = 330.0;
-    size_t a_bytes = (size_t)M * (size_t)K * sizeof(uint16_t);
-    size_t b_bytes = (size_t)K * (size_t)N * sizeof(uint16_t);
-    size_t c_bytes = (size_t)M * (size_t)N *
+    int lda = K * stride_factor;
+    int ldb = K * stride_factor;
+    int ldc = N * stride_factor;
+    size_t a_elems = (size_t)M * (size_t)lda;
+    size_t b_elems = (size_t)ldb * (size_t)N;
+    size_t c_elems = (size_t)M * (size_t)ldc;
+    size_t a_bytes = a_elems * sizeof(uint16_t);
+    size_t b_bytes = b_elems * sizeof(uint16_t);
+    size_t c_bytes = c_elems *
                      (mode_is_bf16(mode) ? sizeof(uint16_t) : sizeof(float));
     size_t bias_bytes = mode_is_bias(mode) ? (size_t)N * sizeof(float) : 0;
-    double kib = (double)(a_bytes + b_bytes + c_bytes + bias_bytes) / 1024.0;
+    size_t one_batch_bytes = a_bytes + b_bytes + c_bytes + bias_bytes;
+    double kib = (double)one_batch_bytes * (double)batch_count / 1024.0;
 
-    uint16_t *A = (uint16_t *)xalloc(a_bytes);
-    uint16_t *B = (uint16_t *)xalloc(b_bytes);
-    uint16_t *A_reorder = (uint16_t *)xalloc(a_bytes);
-    float *C_f32 = (float *)xalloc((size_t)M * (size_t)N * sizeof(float));
-    uint16_t *C_bf16 = (uint16_t *)xalloc((size_t)M * (size_t)N * sizeof(uint16_t));
+    uint16_t *A = (uint16_t *)xalloc(a_bytes * (size_t)batch_count);
+    uint16_t *B = (uint16_t *)xalloc(b_bytes * (size_t)batch_count);
+    uint16_t *A_reorder = (uint16_t *)xalloc((size_t)M * (size_t)K *
+                                             sizeof(uint16_t) * (size_t)batch_count);
+    float *C_f32 = (float *)xalloc(c_elems * sizeof(float) * (size_t)batch_count);
+    uint16_t *C_bf16 = (uint16_t *)xalloc(c_elems * sizeof(uint16_t) *
+                                          (size_t)batch_count);
     float *bias = (float *)xalloc((size_t)N * sizeof(float));
 
-    pack_a8(A, A_reorder, M, K);
+    for (int b = 0; b < batch_count; b++)
+        pack_a8(A + (size_t)b * a_elems,
+                A_reorder + (size_t)b * (size_t)M * (size_t)K, M, K, lda);
     fill_bias(bias, N);
-    gemm_params_t params = {M, K, N, K, K, N};
+    gemm_params_t params = {M, K, N, lda, ldb, ldc};
 
-    for (int i = 0; i < warmup; i++)
-        run_kernel_mt(mode, A, B, C_f32, C_bf16, A_reorder, &params, bias,
-                      threads);
+    for (int i = 0; i < warmup; i++) {
+        for (int b = 0; b < batch_count; b++) {
+            run_kernel_mt(mode,
+                          A + (size_t)b * a_elems,
+                          B + (size_t)b * b_elems,
+                          C_f32 + (size_t)b * c_elems,
+                          C_bf16 + (size_t)b * c_elems,
+                          A_reorder + (size_t)b * (size_t)M * (size_t)K,
+                          &params, bias, threads);
+        }
+    }
 
     double best = 0.0;
-    double ops = 2.0 * (double)M * (double)N * (double)K;
+    double ops = 2.0 * (double)M * (double)N * (double)K * (double)batch_count;
     for (int r = 0; r < runs; r++) {
         double t0 = now_sec();
-        for (int i = 0; i < reps; i++)
-            run_kernel_mt(mode, A, B, C_f32, C_bf16, A_reorder, &params, bias,
-                          threads);
+        for (int i = 0; i < reps; i++) {
+            for (int b = 0; b < batch_count; b++) {
+                run_kernel_mt(mode,
+                              A + (size_t)b * a_elems,
+                              B + (size_t)b * b_elems,
+                              C_f32 + (size_t)b * c_elems,
+                              C_bf16 + (size_t)b * c_elems,
+                              A_reorder + (size_t)b * (size_t)M * (size_t)K,
+                              &params, bias, threads);
+            }
+        }
         double dt = (now_sec() - t0) / (double)reps;
         double gflops = ops / dt / 1e9;
         if (gflops > best)
             best = gflops;
     }
 
-    printf("%s,%s,%s,%d,%d,%d,%d,%.1f,%d,%.2f,%.2f,%.2f\n",
+    printf("%s,%s,%s,%d,%d,%d,%d,%.1f,%d,%.2f,%.2f,%.2f,%d,%d\n",
            variant, mode, cache_class(kib), M, K, N, threads, kib, reps,
            best, best * 100.0 / peak_gflops,
-           best * 100.0 / (peak_gflops * (double)threads));
+           best * 100.0 / (peak_gflops * (double)threads),
+           stride_factor, batch_count);
 
     free(A);
     free(B);

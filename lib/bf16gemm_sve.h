@@ -2,7 +2,8 @@
 //
 // This header exposes the optimized SVE dispatcher. The default schedule is
 // the current best measured policy:
-//   - clamp excessive thread counts for tiny work units
+//   - leave requested thread count unchanged by default
+//   - allow opt-in thread clamp for tiny work units
 //   - use N-split for large B panels with N >= 2*M
 //   - keep M-split for small/H2-sized panels
 //   - use the M12 body in N-split only when M >= 24 and K >= 64

@@ -36,7 +36,7 @@ static int round_up_int(int x, int q) {
 
 static bf16gemm_sve_schedule_t bf16_sve_schedule = {
     BF16GEMM_SVE_SPLIT_AUTO,
-    1,
+    0,
     -1,
     512u * 1024u,
     24,
@@ -47,7 +47,7 @@ void bf16gemm_sve_get_default_schedule(bf16gemm_sve_schedule_t *schedule) {
     if (!schedule)
         return;
     schedule->split_policy = BF16GEMM_SVE_SPLIT_AUTO;
-    schedule->clamp_threads = 1;
+    schedule->clamp_threads = 0;
     schedule->no_reorder_max_m = -1;
     schedule->n_split_min_b_panel_bytes = 512u * 1024u;
     schedule->n_split_m12_min_m = 24;
@@ -193,6 +193,35 @@ static int bf16_use_n_split(int M, int K_r, int N_r, int n_tiles,
     const size_t b_panel_bytes = (size_t)K_r * (size_t)N_r * sizeof(bf16_t);
     return b_panel_bytes >= bf16_sve_schedule.n_split_min_b_panel_bytes &&
            N_r >= M * 2;
+}
+
+static int bf16_clamp_threads_for_split(int num_threads, int M, int n_tiles,
+                                        int use_n_split) {
+    int clamp_threads = bf16_sve_schedule.clamp_threads;
+    const char *clamp_env = getenv("BF16_SVE_CLAMP_THREADS");
+    if (clamp_env)
+        clamp_threads = atoi(clamp_env) != 0;
+    if (!clamp_threads || num_threads <= 1)
+        return num_threads;
+
+    /*
+     * Opt-in clamp for machines where one work unit per active thread is too
+     * thin for OpenMP overhead. Keep at least two M8 blocks per thread for
+     * M-split and at least two N tiles per thread for N-split. Forced and
+     * experimental block split paths keep their own policy.
+     */
+    int max_threads;
+    if (use_n_split) {
+        max_threads = (n_tiles + 1) / 2;
+    } else {
+        const int m_blocks = (M + 7) / 8;
+        max_threads = (m_blocks + 1) / 2;
+    }
+    if (max_threads < 1)
+        max_threads = 1;
+    if (num_threads > max_threads)
+        num_threads = max_threads;
+    return num_threads;
 }
 
 static int bf16_use_2d_split(void) {
@@ -908,6 +937,9 @@ void bf16gemm_mt_dispatch(const bf16_t *A, const bf16_t *B_reo,
         return;
     }
 
+    num_threads = bf16_clamp_threads_for_split(num_threads, M, n_tiles,
+                                               use_n_split);
+
     if (!use_n_split) {
         if (no_reorder) {
             #pragma omp parallel for num_threads(num_threads) schedule(static)
@@ -1069,6 +1101,8 @@ void bf16gemm_mt_dispatch_bias_f(const bf16_t *A, const bf16_t *B_reo,
     const size_t a_stride = bf16_a_reorder_stride(K_r);
     const int no_reorder = bf16_use_no_reorder_for_shape(M, n_tiles);
     const int use_n_split = bf16_use_n_split(M, K_r, N_r, n_tiles, num_threads);
+    num_threads = bf16_clamp_threads_for_split(num_threads, M, n_tiles,
+                                               use_n_split);
     const int m_blocks = (M + 7) / 8;
 
     if (!use_n_split) {
@@ -1154,6 +1188,8 @@ void bf16gemm_mt_dispatch_nld_b(const bf16_t *A, const bf16_t *B_reo,
     const size_t a_stride = bf16_a_reorder_stride(K_r);
     const int no_reorder = bf16_use_no_reorder_for_shape(M, n_tiles);
     const int use_n_split = bf16_use_n_split(M, K_r, N_r, n_tiles, num_threads);
+    num_threads = bf16_clamp_threads_for_split(num_threads, M, n_tiles,
+                                               use_n_split);
     const int m_blocks = (M + 7) / 8;
 
     if (!use_n_split) {

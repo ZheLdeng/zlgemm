@@ -31,11 +31,15 @@ set -euo pipefail
 #   NCORES=16 THREADS=auto ./run_m8_parts.sh
 #   K_VALUES="128 256" PART_VARIANTS="full nostore noload" ./run_m8_parts.sh
 #   STORE_IMPLS="sve neon" STORE_MODES="f32 bf16 bias" ./run_m8_parts.sh
+#   RUN_STRIDE=1 STRIDE_FACTORS="1 2" ./run_m8_parts.sh
+#   RUN_BATCH=1 BATCH_COUNTS="1 4 16" ./run_m8_parts.sh
+#   RUN_DISPATCH=1 DISPATCH_IMPLS="sve neon" DISPATCH_DTYPES="bf16 i8" ./run_m8_parts.sh
 #   RUN_TAILS=1 TAIL_BASE_M_VALUES=16 TAIL_DELTAS="1 2 4" ./run_m8_parts.sh
 #   RESULTS_XLSX=/tmp/m8.xlsx ./run_m8_parts.sh
 #   KEEP_CSV=1 OUT=/tmp/m8_parts.csv TAIL_OUT=/tmp/m8_tail.csv ./run_m8_parts.sh
 #   PROGRESS=0 ./run_m8_parts.sh
 #   CASE_MODE=grid ./run_m8_parts.sh
+#   CASE_MODE=lite ./run_m8_parts.sh
 #   CASES="64,512,4096 2048,4096,1024" ./run_m8_parts.sh
 #   PRUNE_BIG_CASE_THREADS=0 ./run_m8_parts.sh
 #   PRUNE_TOTAL_BYTES=$((3*1024*1024)) PRUNE_PER_THREAD_BYTES=$((4*1024*1024)) ./run_m8_parts.sh
@@ -54,14 +58,15 @@ SVE_SRC=${SVE_SRC:-"$SCRIPT_DIR/bf16gemm_sve_m8_nld.S"}
 NEON_SRC=${NEON_SRC:-"$SCRIPT_DIR/bf16gemm_neon_m8_nld.S"}
 BENCH=${BENCH:-"$SCRIPT_DIR/bench_m8_parts.c"}
 TAIL_BENCH=${TAIL_BENCH:-"$SCRIPT_DIR/bench_full_tail.c"}
+DISPATCH_BENCH=${DISPATCH_BENCH:-"$SCRIPT_DIR/bench_dispatch_types.c"}
 OUT=${OUT:-"$RESULTS_DIR/m8_parts_results.csv"}
 TAIL_OUT=${TAIL_OUT:-"$RESULTS_DIR/m8_tail_results.csv"}
+STRIDE_OUT=${STRIDE_OUT:-"$RESULTS_DIR/m8_stride_results.csv"}
+BATCH_OUT=${BATCH_OUT:-"$RESULTS_DIR/m8_batch_results.csv"}
+DISPATCH_OUT=${DISPATCH_OUT:-"$RESULTS_DIR/m8_dispatch_results.csv"}
 RESULTS_XLSX=${RESULTS_XLSX:-"$RESULTS_DIR/m8_results.xlsx"}
 WRITE_XLSX=${WRITE_XLSX:-1}
 KEEP_CSV=${KEEP_CSV:-0}
-REPS=${REPS:-100}
-WARMUP=${WARMUP:-50}
-RUNS=${RUNS:-7}
 K_VALUES=${K_VALUES:-"128 256 512 1024 2048 4096"}
 M_VALUES=${M_VALUES:-"16 32 64 128 256 512 1024 2048"}
 N_VALUES=${N_VALUES:-"16 32 64 128 256 512 1024 2048 4096 8192"}
@@ -85,9 +90,36 @@ DEFAULT_CASES="
 2048,16384,32
 16,4,4096 16,4096,32320
 "
-CASES=${CASES:-"$DEFAULT_CASES"}
+LITE_CASES=${LITE_CASES:-"
+16,512,128
+16,512,4096
+64,512,512
+64,512,4096
+64,4096,64
+64,4096,1024
+128,4096,1024
+512,512,4096
+512,4096,1024
+2048,512,4096
+2048,1024,8192
+2048,4096,64
+"}
+if [[ "$CASE_MODE" == "lite" ]]; then
+    REPS=${REPS:-20}
+    WARMUP=${WARMUP:-5}
+    RUNS=${RUNS:-3}
+    THREADS=${THREADS:-"1 2 4 8"}
+    CASES=${CASES:-"$LITE_CASES"}
+    RUN_TAILS=${RUN_TAILS:-1}
+    TAIL_CASES=${TAIL_CASES:-"512,4096,1024 64,512,4096 2048,4096,64"}
+else
+    REPS=${REPS:-100}
+    WARMUP=${WARMUP:-50}
+    RUNS=${RUNS:-7}
+    THREADS=${THREADS:-"1"}
+    CASES=${CASES:-"$DEFAULT_CASES"}
+fi
 TAIL_CASES=${TAIL_CASES:-"$CASES"}
-THREADS=${THREADS:-"1"}
 DEFAULT_THREADS=${DEFAULT_THREADS:-"1 2 4 8 10 16 20 32 40 64 80"}
 NPROC=$(nproc 2>/dev/null || echo 64)
 LAST=$((NPROC - 1))
@@ -101,6 +133,15 @@ OMP_PROC_BIND=${OMP_PROC_BIND:-close}
 PART_VARIANTS=${PART_VARIANTS:-"full prepacked nozero nostore noload nozero_nostore noload_nostore"}
 STORE_IMPLS=${STORE_IMPLS:-"sve neon"}
 STORE_MODES=${STORE_MODES:-"f32 bf16 bias"}
+STRIDE_IMPLS=${STRIDE_IMPLS:-"sve neon"}
+STRIDE_MODES=${STRIDE_MODES:-"f32"}
+STRIDE_FACTORS=${STRIDE_FACTORS:-"1 2"}
+BATCH_IMPLS=${BATCH_IMPLS:-"sve neon"}
+BATCH_MODES=${BATCH_MODES:-"f32"}
+BATCH_COUNTS=${BATCH_COUNTS:-"1 4 16"}
+DISPATCH_IMPLS=${DISPATCH_IMPLS:-"sve neon"}
+DISPATCH_DTYPES=${DISPATCH_DTYPES:-"bf16 i8"}
+DISPATCH_BATCH_COUNTS=${DISPATCH_BATCH_COUNTS:-"1"}
 BASELINE_IMPLS=${BASELINE_IMPLS:-"sve neon"}
 TAIL_IMPLS=${TAIL_IMPLS:-"sve neon"}
 TAIL_BASE_M_VALUES=${TAIL_BASE_M_VALUES:-"$M_VALUES"}
@@ -110,6 +151,9 @@ RUN_PARTS=${RUN_PARTS:-1}
 RUN_STORES=${RUN_STORES:-1}
 RUN_BASELINES=${RUN_BASELINES:-1}
 RUN_TAILS=${RUN_TAILS:-1}
+RUN_STRIDE=${RUN_STRIDE:-0}
+RUN_BATCH=${RUN_BATCH:-0}
+RUN_DISPATCH=${RUN_DISPATCH:-0}
 PROGRESS=${PROGRESS:-1}
 PRUNE_BIG_CASE_THREADS=${PRUNE_BIG_CASE_THREADS:-1}
 PRUNE_TOTAL_BYTES=${PRUNE_TOTAL_BYTES:-$((3 * 1024 * 1024))}
@@ -235,7 +279,7 @@ TOTAL_STEPS=0
 STEP=0
 
 count_total_steps() {
-    local nc nb np ns nsm nti nd
+    local nc nb np ns nsm nti nd nsi nsim nsf nbti nbc ndi ndt ndbc
     nc=$(case_count)
     nb=0
     np=0
@@ -243,6 +287,14 @@ count_total_steps() {
     nsm=0
     nti=0
     nd=0
+    nsi=0
+    nsim=0
+    nsf=0
+    nbti=0
+    nbc=0
+    ndi=0
+    ndt=0
+    ndbc=0
     if [[ "$RUN_BASELINES" != "0" ]]; then
         nb=$(count_words $BASELINE_IMPLS)
     fi
@@ -257,8 +309,23 @@ count_total_steps() {
         nti=$(count_words $TAIL_IMPLS)
         nd=$(count_words $TAIL_DELTAS)
     fi
+    if [[ "$RUN_STRIDE" != "0" ]]; then
+        nsi=$(count_words $STRIDE_IMPLS)
+        nsim=$(count_words $STRIDE_MODES)
+        nsf=$(count_words $STRIDE_FACTORS)
+    fi
+    if [[ "$RUN_BATCH" != "0" ]]; then
+        nbti=$(count_words $BATCH_IMPLS)
+        nbc=$(count_words $BATCH_COUNTS)
+    fi
+    if [[ "$RUN_DISPATCH" != "0" ]]; then
+        ndi=$(count_words $DISPATCH_IMPLS)
+        ndt=$(count_words $DISPATCH_DTYPES)
+        ndbc=$(count_words $DISPATCH_BATCH_COUNTS)
+    fi
 
     local per_case_parts=$((nb + np + ns * nsm))
+    local per_case_extra=$((nsi * nsim * nsf + nbti * nbc + ndi * ndt * ndbc))
     local per_tail_impl=$((1 + nd))
     local t M K N case base_M tail_m max_d
     TOTAL_STEPS=0
@@ -269,7 +336,7 @@ count_total_steps() {
                 for N in $N_VALUES; do
                     for t in $THREADS; do
                         if case_thread_allowed "$M" "$K" "$N" "$t"; then
-                            TOTAL_STEPS=$((TOTAL_STEPS + per_case_parts))
+                            TOTAL_STEPS=$((TOTAL_STEPS + per_case_parts + per_case_extra))
                         fi
                     done
                 done
@@ -280,7 +347,7 @@ count_total_steps() {
             IFS=, read -r M K N <<< "$case"
             for t in $THREADS; do
                 if case_thread_allowed "$M" "$K" "$N" "$t"; then
-                    TOTAL_STEPS=$((TOTAL_STEPS + per_case_parts))
+                    TOTAL_STEPS=$((TOTAL_STEPS + per_case_parts + per_case_extra))
                 fi
             done
         done
@@ -335,9 +402,8 @@ run_bench() {
 
 write_xlsx() {
     local xlsx=$1
-    local parts_csv=$2
-    local tail_csv=$3
-    python3 - "$xlsx" "$parts_csv" "$tail_csv" <<'PY'
+    shift
+    python3 - "$xlsx" "$@" <<'PY'
 import csv
 import html
 import os
@@ -345,10 +411,17 @@ import re
 import sys
 import zipfile
 
-xlsx, parts_csv, tail_csv = sys.argv[1], sys.argv[2], sys.argv[3]
-sheets = [("parts", parts_csv)]
-if os.path.exists(tail_csv):
-    sheets.append(("tail", tail_csv))
+xlsx = sys.argv[1]
+args = sys.argv[2:]
+if len(args) % 2 != 0:
+    raise SystemExit("write_xlsx expects sheet/path pairs")
+sheets = []
+for i in range(0, len(args), 2):
+    name, path = args[i], args[i + 1]
+    if path and os.path.exists(path):
+        sheets.append((name, path))
+if not sheets:
+    raise SystemExit("no CSV sheets to write")
 
 num_re = re.compile(r"^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$")
 
@@ -535,6 +608,36 @@ generate_neon_compute_only() {
 #define bf16gemm_k_nld4_b   bf16gemm_neon_unused_nld4_b
 #include "bf16gemm_k.S"
 
+	.purgem INIT
+	.macro INIT
+	stp x19, x20, [sp, #-16]!
+	stp x21, x22, [sp, #-16]!
+	stp x23, x24, [sp, #-16]!
+	stp x25, x26, [sp, #-16]!
+	stp x27, x28, [sp, #-16]!
+	stp x29, x30, [sp, #-16]!
+	stp d8,  d9,  [sp, #-16]!
+	stp d10, d11, [sp, #-16]!
+	stp d12, d13, [sp, #-16]!
+	stp d14, d15, [sp, #-16]!
+	movi v0.8h, #1
+	movi v1.8h, #1
+	movi v2.8h, #1
+	movi v3.8h, #1
+	movi v4.8h, #1
+	movi v5.8h, #1
+	movi v6.8h, #1
+	movi v7.8h, #1
+	movi v8.8h, #1
+	movi v25.8h, #1
+	movi v26.8h, #1
+	movi v27.8h, #1
+	movi v28.8h, #1
+	movi v29.8h, #1
+	movi v30.8h, #1
+	movi v31.8h, #1
+	.endm
+
 	.macro LOAD_NOTHING_8
 	.endm
 
@@ -548,28 +651,6 @@ generate_neon_compute_only() {
 	.purgem LOAD_A0_B0_STRIDED_8
 	.purgem COMPUTE_A1_B1_STRIDED_8
 	.purgem COMPUTE_A2_B2_STRIDED_8
-
-	.macro INIT_A0_B0
-	movi v0.8h, #1
-	movi v1.8h, #1
-	movi v2.8h, #1
-	movi v3.8h, #1
-	movi v4.8h, #1
-	movi v5.8h, #1
-	movi v6.8h, #1
-	movi v7.8h, #1
-	.endm
-
-	.macro INIT_A1_B1
-	movi v8.8h, #1
-	movi v25.8h, #1
-	movi v26.8h, #1
-	movi v27.8h, #1
-	movi v28.8h, #1
-	movi v29.8h, #1
-	movi v30.8h, #1
-	movi v31.8h, #1
-	.endm
 
 	.macro COMPUTE_A0_B0_ONLY
 	bfmmla v9.4s,  v0.8h, v4.8h
@@ -610,16 +691,13 @@ generate_neon_compute_only() {
 	.endm
 
 	.macro LOAD_A0_B0_8
-	INIT_A0_B0
 	.endm
 
 	.macro COMPUTE_A1_B1_8
-	INIT_A1_B1
 	COMPUTE_A0_B0_ONLY
 	.endm
 
 	.macro COMPUTE_A2_B2_8
-	INIT_A0_B0
 	COMPUTE_A1_B1_ONLY
 	.endm
 
@@ -696,6 +774,30 @@ build_tail_full() {
     esac
 }
 
+build_dispatch() {
+    local impl=$1
+    local bin="$WORKDIR/bench_dispatch_${impl}"
+    case "$impl" in
+        sve)
+            "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS -DBENCH_SVE=1 \
+                "$DISPATCH_BENCH" \
+                "$LIB_DIR/bf16gemm_sve.c" "$LIB_DIR/bf16gemm_sve.S" \
+                "$LIB_DIR/i8gemm_sve.c" "$LIB_DIR/i8gemm_sve.S" \
+                -o "$bin" -lm
+            ;;
+        neon)
+            "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS \
+                "$DISPATCH_BENCH" \
+                "$LIB_DIR/bf16gemm_mt.c" "$LIB_DIR/bf16gemm_k.S" \
+                "$LIB_DIR/bf16gemm_k_bias.S" \
+                "$LIB_DIR/i8gemm_mt.c" "$LIB_DIR/i8gemm_k.S" \
+                "$LIB_DIR/i8gemm_k_bias.S" \
+                -o "$bin" -lm
+            ;;
+        *) echo "unknown dispatch impl: $impl" >&2; exit 2 ;;
+    esac
+}
+
 if [[ "$RUN_PARTS" != "0" ]]; then
     for variant in $PART_VARIANTS; do
         build_variant "$variant"
@@ -715,6 +817,32 @@ if [[ "$RUN_STORES" != "0" ]]; then
             neon) build_source "store_neon" "$NEON_SRC" ;;
             *) echo "unknown impl: $impl" >&2; exit 2 ;;
         esac
+    done
+fi
+
+if [[ "$RUN_STRIDE" != "0" ]]; then
+    for impl in $STRIDE_IMPLS; do
+        case "$impl" in
+            sve)  build_source "store_sve" "$SVE_SRC" ;;
+            neon) build_source "store_neon" "$NEON_SRC" ;;
+            *) echo "unknown stride impl: $impl" >&2; exit 2 ;;
+        esac
+    done
+fi
+
+if [[ "$RUN_BATCH" != "0" ]]; then
+    for impl in $BATCH_IMPLS; do
+        case "$impl" in
+            sve)  build_source "store_sve" "$SVE_SRC" ;;
+            neon) build_source "store_neon" "$NEON_SRC" ;;
+            *) echo "unknown batch impl: $impl" >&2; exit 2 ;;
+        esac
+    done
+fi
+
+if [[ "$RUN_DISPATCH" != "0" ]]; then
+    for impl in $DISPATCH_IMPLS; do
+        build_dispatch "$impl"
     done
 fi
 
@@ -743,7 +871,7 @@ fi
     echo "# planned benchmark calls: $TOTAL_STEPS"
 } >&2
 
-echo "variant,mode,cache,M,K,N,threads,KiB,reps,GFLOPS,pct_of_330,pct_of_330xthreads" > "$OUT"
+echo "variant,mode,cache,M,K,N,threads,KiB,reps,GFLOPS,pct_of_330,pct_of_330xthreads,stride_factor,batch_count" > "$OUT"
 
 run_parts_case() {
     local M=$1
@@ -793,6 +921,129 @@ else
 fi
 
 echo "wrote $OUT"
+
+if [[ "$RUN_STRIDE" != "0" ]]; then
+    echo "variant,mode,cache,M,K,N,threads,KiB,reps,GFLOPS,pct_of_330,pct_of_330xthreads,stride_factor,batch_count" > "$STRIDE_OUT"
+
+    run_stride_case() {
+        local M=$1
+        local K=$2
+        local N=$3
+        local T impl mode sf
+        for T in $THREADS; do
+            if ! case_thread_allowed "$M" "$K" "$N" "$T"; then
+                continue
+            fi
+            for impl in $STRIDE_IMPLS; do
+                for mode in $STRIDE_MODES; do
+                    for sf in $STRIDE_FACTORS; do
+                        progress "stride impl=$impl mode=$mode stride=$sf M=$M K=$K N=$N threads=$T"
+                        run_bench "$WORKDIR/bench_store_${impl}" "${impl}_${mode}_stride${sf}" \
+                            "$M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" "$mode" "$T" "$sf" 1 >> "$STRIDE_OUT"
+                    done
+                done
+            done
+        done
+    }
+
+    if [[ "$CASE_MODE" == "grid" ]]; then
+        for K in $K_VALUES; do
+            for M in $M_VALUES; do
+                for N in $N_VALUES; do
+                    run_stride_case "$M" "$K" "$N"
+                done
+            done
+        done
+    else
+        for case in $CASES; do
+            IFS=, read -r M K N <<< "$case"
+            run_stride_case "$M" "$K" "$N"
+        done
+    fi
+    echo "wrote $STRIDE_OUT"
+fi
+
+if [[ "$RUN_BATCH" != "0" ]]; then
+    echo "variant,mode,cache,M,K,N,threads,KiB,reps,GFLOPS,pct_of_330,pct_of_330xthreads,stride_factor,batch_count" > "$BATCH_OUT"
+
+    run_batch_case() {
+        local M=$1
+        local K=$2
+        local N=$3
+        local T impl mode bc
+        for T in $THREADS; do
+            if ! case_thread_allowed "$M" "$K" "$N" "$T"; then
+                continue
+            fi
+            for impl in $BATCH_IMPLS; do
+                for mode in $BATCH_MODES; do
+                    for bc in $BATCH_COUNTS; do
+                        progress "batch impl=$impl mode=$mode batch=$bc M=$M K=$K N=$N threads=$T"
+                        run_bench "$WORKDIR/bench_store_${impl}" "${impl}_${mode}_batch${bc}" \
+                            "$M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" "$mode" "$T" 1 "$bc" >> "$BATCH_OUT"
+                    done
+                done
+            done
+        done
+    }
+
+    if [[ "$CASE_MODE" == "grid" ]]; then
+        for K in $K_VALUES; do
+            for M in $M_VALUES; do
+                for N in $N_VALUES; do
+                    run_batch_case "$M" "$K" "$N"
+                done
+            done
+        done
+    else
+        for case in $CASES; do
+            IFS=, read -r M K N <<< "$case"
+            run_batch_case "$M" "$K" "$N"
+        done
+    fi
+    echo "wrote $BATCH_OUT"
+fi
+
+if [[ "$RUN_DISPATCH" != "0" ]]; then
+    echo "impl,dtype,cache,M,K,N,threads,batch_count,KiB,reps,perf,pct_of_baseline,pct_of_baseline_xthreads" > "$DISPATCH_OUT"
+
+    run_dispatch_case() {
+        local M=$1
+        local K=$2
+        local N=$3
+        local T impl dtype bc
+        for T in $THREADS; do
+            if ! case_thread_allowed "$M" "$K" "$N" "$T"; then
+                continue
+            fi
+            for impl in $DISPATCH_IMPLS; do
+                for dtype in $DISPATCH_DTYPES; do
+                    for bc in $DISPATCH_BATCH_COUNTS; do
+                        progress "dispatch impl=$impl dtype=$dtype batch=$bc M=$M K=$K N=$N threads=$T"
+                        run_bench "$WORKDIR/bench_dispatch_${impl}" "$impl" "$dtype" \
+                            "$M" "$K" "$N" "$REPS" "$WARMUP" "$RUNS" "$T" "$bc" >> "$DISPATCH_OUT"
+                    done
+                done
+            done
+        done
+    }
+
+    if [[ "$CASE_MODE" == "grid" ]]; then
+        for K in $K_VALUES; do
+            for M in $M_VALUES; do
+                for N in $N_VALUES; do
+                    run_dispatch_case "$M" "$K" "$N"
+                done
+            done
+        done
+    else
+        for case in $CASES; do
+            IFS=, read -r M K N <<< "$case"
+            run_dispatch_case "$M" "$K" "$N"
+        done
+    fi
+    echo "wrote $DISPATCH_OUT"
+fi
 
 if [[ "$RUN_TAILS" != "0" ]]; then
     echo "impl,mode,cache,base_M,tail_M,K,N,threads,KiB,reps,base_GFLOPS,tail_GFLOPS,tail_vs_base_pct,tail_drop_pct,pct_of_330,pct_of_330xthreads" > "$TAIL_OUT"
@@ -849,12 +1100,34 @@ if [[ "$RUN_TAILS" != "0" ]]; then
 fi
 
 if [[ "$WRITE_XLSX" != "0" ]]; then
-    write_xlsx "$RESULTS_XLSX" "$OUT" "$TAIL_OUT"
+    XLSX_SHEETS=(parts "$OUT")
+    if [[ "$RUN_TAILS" != "0" ]]; then
+        XLSX_SHEETS+=(tail "$TAIL_OUT")
+    fi
+    if [[ "$RUN_STRIDE" != "0" ]]; then
+        XLSX_SHEETS+=(stride "$STRIDE_OUT")
+    fi
+    if [[ "$RUN_BATCH" != "0" ]]; then
+        XLSX_SHEETS+=(batch "$BATCH_OUT")
+    fi
+    if [[ "$RUN_DISPATCH" != "0" ]]; then
+        XLSX_SHEETS+=(dispatch "$DISPATCH_OUT")
+    fi
+    write_xlsx "$RESULTS_XLSX" "${XLSX_SHEETS[@]}"
     echo "wrote $RESULTS_XLSX"
     if [[ "$KEEP_CSV" == "0" ]]; then
         rm -f "$OUT"
         if [[ "$RUN_TAILS" != "0" ]]; then
             rm -f "$TAIL_OUT"
+        fi
+        if [[ "$RUN_STRIDE" != "0" ]]; then
+            rm -f "$STRIDE_OUT"
+        fi
+        if [[ "$RUN_BATCH" != "0" ]]; then
+            rm -f "$BATCH_OUT"
+        fi
+        if [[ "$RUN_DISPATCH" != "0" ]]; then
+            rm -f "$DISPATCH_OUT"
         fi
     fi
 fi
