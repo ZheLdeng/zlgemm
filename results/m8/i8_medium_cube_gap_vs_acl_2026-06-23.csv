@@ -1,0 +1,12 @@
+# i8 medium cube gap vs ACL, Neoverse-V1 8 cores. Measured 2026-06-23.
+# METHODOLOGY: runs>=4 (best-of) is REQUIRED on this machine; runs=1 gives
+# spurious cold/contended collapses (saw 256^3@8 read as 121 instead of ~1900).
+# perf = GOPS. SVE = current dispatch (default routing). ACL = build-codex acl_auto.
+shape,threads,SVE,ACL,SVE_over_ACL
+192x192x192,8,1783.6,1925.9,0.926
+224x224x224,8,1705.2,2093.5,0.815
+256x256x256,8,1929.4,2313.7,0.834
+256x256x256,1,457.8,482.8,0.948
+256x256x256,2,686.2,776.2,0.884
+256x256x256,4,1118.0,1349.0,0.829
+256x256x256,8,1946.1,2266.2,0.859
