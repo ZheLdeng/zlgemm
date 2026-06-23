@@ -1,3 +1,7 @@
+# Editor/backup artifacts and scratch perf dumps
+*.orig
+tests/perf.txt
+
 # Binaries
 calculate_lda
 calculate_lda_test
