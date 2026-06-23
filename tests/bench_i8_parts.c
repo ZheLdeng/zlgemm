@@ -31,6 +31,11 @@ typedef struct {
 extern void i8gemm_k_ld(const int8_t *A, const int8_t *B_reo,
                         int32_t *C, int8_t *A_reorder,
                         const gemm_params_t *params);
+extern void i8gemm_k_reo_ld(const int8_t *A, const int8_t *B_reo,
+                            int32_t *C, int8_t *A_reorder,
+                            const gemm_params_t *params);
+
+static int g_prepacked_a = 0;
 
 static double now_sec(void) {
     struct timespec ts;
@@ -156,7 +161,10 @@ static int use_n_split_for_shape(int M, int K, int N, int threads) {
 
 static void run_kernel(const int8_t *A, const int8_t *B, int32_t *C,
                        int8_t *A_reorder, const gemm_params_t *params) {
-    i8gemm_k_ld(A, B, C, A_reorder, params);
+    if (g_prepacked_a)
+        i8gemm_k_reo_ld(A, B, C, A_reorder, params);
+    else
+        i8gemm_k_ld(A, B, C, A_reorder, params);
 }
 
 static void run_kernel_mt(const int8_t *A, const int8_t *B, int32_t *C,
@@ -224,6 +232,7 @@ int main(int argc, char **argv) {
     }
 
     const char *variant = argv[1];
+    g_prepacked_a = strstr(variant, "prepacked") != NULL;
     int M = atoi(argv[2]);
     int K = atoi(argv[3]);
     int N = atoi(argv[4]);

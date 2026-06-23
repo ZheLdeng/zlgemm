@@ -25,6 +25,9 @@ static int round_up_int(int x, int q) {
 
 static int n_tile(void) {
 #ifdef BENCH_SVE
+    const char *n3_env = getenv("I8_SVE_N3");
+    if (n3_env && atoi(n3_env) != 0)
+        return 3 * (int)svcntw();
     return (int)(svcntb() / 16) * 8;
 #else
     return 8;
@@ -173,7 +176,7 @@ static double bench_bf16_one(int M, int K, int N, int reps, int warmup,
     return best;
 }
 
-static double bench_i8_one(int M, int K, int N, int reps, int warmup,
+static double bench_i8_one(const char *impl, int M, int K, int N, int reps, int warmup,
                            int runs, int threads, int batch_count,
                            double *kib_out) {
     int K_r = 0, N_r = 0;
@@ -199,10 +202,16 @@ static double bench_i8_one(int M, int K, int N, int reps, int warmup,
                          (size_t)K_r * (size_t)N_r +
                          (size_t)M * (size_t)N_r * sizeof(i32_t))) / 1024.0;
 
+    const int use_m16n4 = strstr(impl, "m16n4") != NULL;
+
     for (int w = 0; w < warmup; w++)
         for (int b = 0; b < batch_count; b++)
-            i8gemm_mt_dispatch(A_pad[b], B_reo[b], C[b], M, K_r, N_r,
-                               threads);
+            if (use_m16n4)
+                i8gemm_mt_dispatch_m16n4(A_pad[b], B_reo[b], C[b], M, K_r,
+                                         N_r, threads);
+            else
+                i8gemm_mt_dispatch(A_pad[b], B_reo[b], C[b], M, K_r, N_r,
+                                   threads);
 
     double best = 0.0;
     const double ops = 2.0 * (double)M * (double)K * (double)N *
@@ -211,8 +220,12 @@ static double bench_i8_one(int M, int K, int N, int reps, int warmup,
         double t0 = now_sec();
         for (int i = 0; i < reps; i++)
             for (int b = 0; b < batch_count; b++)
-                i8gemm_mt_dispatch(A_pad[b], B_reo[b], C[b], M, K_r, N_r,
-                                   threads);
+                if (use_m16n4)
+                    i8gemm_mt_dispatch_m16n4(A_pad[b], B_reo[b], C[b], M,
+                                             K_r, N_r, threads);
+                else
+                    i8gemm_mt_dispatch(A_pad[b], B_reo[b], C[b], M, K_r,
+                                       N_r, threads);
         double dt = (now_sec() - t0) / (double)reps;
         double gops = ops / dt / 1e9;
         if (gops > best)
@@ -270,7 +283,7 @@ int main(int argc, char **argv) {
                   perf, bf16_base);
     }
     if (strcmp(dtype, "i8") == 0 || strcmp(dtype, "both") == 0) {
-        double perf = bench_i8_one(M, K, N, reps, warmup, runs, threads,
+        double perf = bench_i8_one(impl, M, K, N, reps, warmup, runs, threads,
                                    batch_count, &kib);
         print_row(impl, "i8", M, K, N, threads, batch_count, kib, reps,
                   perf, i8_base);

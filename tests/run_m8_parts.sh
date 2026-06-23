@@ -121,8 +121,8 @@ LITE_CASES=${LITE_CASES:-"
 "}
 if [[ "$CASE_MODE" == "lite" ]]; then
     REPS=${REPS:-20}
-    WARMUP=${WARMUP:-5}
-    RUNS=${RUNS:-3}
+    WARMUP=${WARMUP:-0}
+    RUNS=${RUNS:-1}
     THREADS=${THREADS:-"1 2 4 8"}
     CASES=${CASES:-"$LITE_CASES"}
     RUN_TAILS=${RUN_TAILS:-1}
@@ -130,8 +130,8 @@ if [[ "$CASE_MODE" == "lite" ]]; then
     TAIL_CASES=${TAIL_CASES:-"512,4096,1024 64,512,4096 2048,4096,64"}
 else
     REPS=${REPS:-100}
-    WARMUP=${WARMUP:-50}
-    RUNS=${RUNS:-7}
+    WARMUP=${WARMUP:-0}
+    RUNS=${RUNS:-1}
     THREADS=${THREADS:-"1"}
     CASES=${CASES:-"$DEFAULT_CASES"}
 fi
