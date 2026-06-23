@@ -5,7 +5,21 @@
 
 ## 0. 一句话现状
 i8gemm 的 SVE i8 路径经过本轮优化后，在**小/中/偏斜形状**上已普遍追平或超过 ACL，
-**bf16 在所有测试点领先 ACL 和 KleidiAI**；剩余差距是 **i8 中等立方体 (192–256³) 在 8 线程**。
+**bf16 在所有测试点领先 ACL 和 KleidiAI**；剩余差距是 **i8 中等立方体 (192–256³) 在 8 线程**
+（本轮 2D blocking 后已大幅收窄，见下）。
+
+> **2026-06-23 更新 — priority #2（中等立方体 @8 的 2D blocking）已大幅推进**：
+> 在 hybrid（免 pack）多线程路径里把"只按 M 切 8 行块"改为**自适应 2D 分发**
+> （`lib/i8gemm_sve.c` 的 `i8gemm_mt_dispatch` hybrid 分支，`M>8` 部分）：
+> ①能整除时用 **2D 线程网格 pm×pn**（既均衡又减少 A/B 冗余 streaming，聚合流量 ~pn·|A|+pm·|B|）；
+> ②`mblk` 不被线程数整除时用 **8行×n_tile 的 2D collapse**（消除 M-split 末块掉队，最高 +23%）；
+> ③否则保持 M-split；④`M<128 或 N<128` 一律 M-split（网格/2D 在小形状上有开销，64–112 实测会回退）。
+> 结果（vs ACL，8 线程，runs=8）：160³ 0.86→**0.99**、192³ 0.94→**0.98**、200³ 0.80→**0.95**、
+> 208³ 0.84→**0.95**、224³ 0.82→**0.94**、240³ 0.87→**0.92**、256³ 0.84→**0.89**；
+> 小形状 (64–112) 与其它线程数 (t2/t4/t6) 无回退（t4/t6 反而 +8~11%），正确性 6000 例通过。
+> CSV: `results/m8/i8_medium_cube_2d_blocking_2026-06-23.csv`。
+> 剩余差距集中在 256³ (0.89)，判断为 A+B 的 LLC 聚合带宽 / prefetch 瓶颈（见 §6.2）。
+> 环境变量 `I8_SVE_HYBMT` 可强制分发模式做对比实验（0=M-split 1=N-split 2=2D-collapse 3=均衡带 4=2D-grid）。
 
 > **2026-06-23 更新 — 预排上限之谜已解决（priority #1 已完成）**：实测本仓库的预排 in-L1 微内核上限，
 > **SVE `i8gemm_k_nld_m12` (12×16) = 89.7%，反而高于 NEON `i8gemm_k_reo_ld` (8×8 K16) = 78.4%**
@@ -92,7 +106,8 @@ make -C tests test-sve # SVE 正确性：应输出 "SVE correctness OK: 6000 wra
 - 赢/平：tiny 立方 16–64（1t/4t）、**96/128 立方（1t/4t/8t，128³@8: 1236 vs 956）**、
   384/512 立方（1t；8t 约平 3–5% 内）、小 M（8×256 全线程）、大 N 偏斜多线程
   （64×64×512@8: 1110 vs 1058）、小 K 偏斜（256×16×256 比优化前 +106%）。
-- ACL 仍领先：**i8 192–256 立方 @8 线程**（192³ −6%、256³ −15%）；单线程 64–256 立方（中 K）。
+- ACL 仍领先：**i8 192–256 立方 @8 线程**——经本轮 2D blocking 已收窄到 192³ −2%、256³ −11%
+  （之前 192³ −6%、256³ −15%；详见 §0 更新与 §6.2）；单线程 64–256 立方（中 K）。
 - **bf16：所有测试点领先 ACL 和 KleidiAI。**
 
 > **2026-06-23 重新核实（runs=4 best-of，CSV: `results/m8/i8_medium_cube_gap_vs_acl_2026-06-23.csv`）**：
@@ -129,14 +144,19 @@ make -C tests test-sve # SVE 正确性：应输出 "SVE correctness OK: 6000 wra
 1. ~~**确认 NEON 预排 kernel 真实上限**~~ ✅ **已完成 (2026-06-23)**：NEON reo_ld=78.4% < SVE m12=89.7%。
    结论 = **不要改走 NEON**（SVE 微内核本就更优）。SVE 单线程端到端已 79–87%，离 90% 内核上限很近，
    单线程已接近最优，无需再优化微内核。详见 §5.2 与 `results/m8/prepacked_ceiling_neon_vs_sve.csv`。
-2. **【当前主攻】i8 192–256 立方 @8**：已确诊为**多线程 L2/LLC 带宽 + cache-blocking** 问题，
-   **不是微内核问题**（256³ 单核 SVE/ACL=0.95，差距随线程数从 0.95 拉大到 0.83–0.86）。
-   方向：保留已证明更优的 SVE m12/hybrid 微内核，在多线程外层加 **2D (M×N) cache-blocking + K-blocking**，
-   使每线程的 (A-panel + B-panel) 常驻 L1/L2 并跨另一维复用，减少 B 的重复 streaming
-   （现 hybrid M-split 每个 8 行块都重读整块 B → 256³ 时 B 流量 ~32×64KB=2MB/matmul）。
+2. ~~**【当前主攻】i8 192–256 立方 @8**~~ 🟡 **大幅推进 (2026-06-23)**：已确诊为**多线程 L2/LLC 带宽 +
+   cache-blocking + 负载均衡**问题（**不是微内核问题**：256³ 单核 SVE/ACL=0.95，差距随线程数拉大到 0.84）。
+   **已做**：保留更优的 SVE hybrid 微内核，把 `i8gemm_mt_dispatch` 的 hybrid `M>8` 分支从"纯 8 行 M-split"
+   改成**自适应 2D 分发**（细节见 §0 更新与 `lib/i8gemm_sve.c`）。结果：192–256³ @8 从 0.80–0.94 提到
+   **0.89–0.98**，最差点 200³ 0.80→0.95，正确性 6000 例通过，小形状/其它线程数无回退。
+   CSV: `results/m8/i8_medium_cube_2d_blocking_2026-06-23.csv`。
+   **关键洞察**：当年怀疑的"B 重复 streaming"只在 `mblk` 不被线程数整除时才是主因（其实是末块掉队的负载不均，
+   8 行块粒度太粗）；能整除的 192/256 用 2D 网格 (pm×pn) 减少 A+B 聚合带宽再拿到几个点。
+   **剩余**：256³ 仍 0.89（A+B 的 LLC 聚合带宽 / ACL `sve_hybrid_s8s32_mmla_6x4VL` 的 prefetch/K-streaming
+   更优）。下一步可试：(a) 显式 K-blocking 让 A/B panel 更常驻；(b) 软件 prefetch B 下一 panel；
+   (c) 给 hybrid 内核做更宽的 N tile（贴近 ACL 4VL）。
    ⚠️ 注意：之前的 **`i8gemm_m16n4` “2d mode” 失败了**（用了较差的 NEON 微内核，普遍输给 auto，
-   见 `results/m8/i8_neon_aclstyle_2d_probe.csv`）；正确做法是**复用 SVE 微内核**只改外层调度/分块，
-   而非引入新 NEON kernel。这是较大的新调度工作，是当前唯一剩余的对 ACL 落后点。
+   见 `results/m8/i8_neon_aclstyle_2d_probe.csv`）；本轮正确做法已验证 = **复用 SVE 微内核只改外层分发**。
 3. 可选：把 hybrid 扩展到 f32/bias（目前 hybrid 只做 i32）。
 4. **收尾提交**：所有改动未提交，bit-exact 无回退，可整理成若干 commit
    （bug 修复 / 反交织 / 缓存 scratch / hybrid+路由 / 预取）。
@@ -161,7 +181,9 @@ make -C tests test-sve # SVE 正确性：应输出 "SVE correctness OK: 6000 wra
   - 结果汇总：`results/m8/prepacked_ceiling_neon_vs_sve.csv`。
 - 关键结果 CSV（2026-06-23）：
   - `results/m8/prepacked_ceiling_neon_vs_sve.csv` —— NEON vs SVE 预排上限（78.4% vs 89.7%）。
-  - `results/m8/i8_medium_cube_gap_vs_acl_2026-06-23.csv` —— 192/224/256³ @8 与 256³ 线程扫描。
+  - `results/m8/i8_medium_cube_gap_vs_acl_2026-06-23.csv` —— 192/224/256³ @8 与 256³ 线程扫描（优化前基线）。
+  - `results/m8/i8_medium_cube_2d_blocking_2026-06-23.csv` —— ✅ 2D 自适应分发前后 vs ACL（128–256³ @8，
+    含线程扫描与非方阵抽查）；这是 priority #2 本轮成果的数据。
 - 三方 bench 二进制：`tests/build/bench_dispatch_i8gemm_sve`（当前优化态）、`bench_acl_dispatch`、
   `bench_kleidiai_dispatch`、`bench_deint`（反交织但无 hybrid 路由，可作对比基线）。
   - ⚠️ 重建 `bench_dispatch_i8gemm_sve` 需带 m16n4 对象（bench 引用 `i8gemm_mt_dispatch_m16n4`）：

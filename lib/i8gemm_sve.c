@@ -468,12 +468,130 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
                                 C + (size_t)t * n_tile, NULL, &pp);
             }
         } else {
-            #pragma omp parallel for num_threads(num_threads) schedule(static)
-            for (int m0 = 0; m0 < M; m0 += 8) {
-                int mb = M - m0 < 8 ? M - m0 : 8;
-                gemm_params_t pp = {mb, K_r, N_r, K_r, K_r, N_r};
-                i8gemm_k_hybrid(A + (size_t)m0 * K_r, B_reo,
-                                C + (size_t)m0 * N_r, NULL, &pp);
+            int mblk = (M + 7) / 8;          // total 8-row blocks
+            int nt = N_r / n_tile;
+            // Pick a balanced 2D thread grid pm x pn (= num_threads) that
+            // divides BOTH the m-block count and the n-panel count evenly.
+            // Such a grid both load-balances and minimises redundant A/B
+            // streaming (aggregate traffic ~ pn*|A| + pm*|B|, least when
+            // pm+pn is smallest, i.e. the most square grid). gpm/gpn stay 0
+            // when no even grid exists.
+            int gpm = 0, gpn = 0, gbest = 0x7fffffff;
+            for (int pn = 1; pn <= num_threads; pn++) {
+                if (num_threads % pn) continue;
+                int pm = num_threads / pn;
+                if (mblk % pm == 0 && nt % pn == 0 && pm + pn < gbest) {
+                    gbest = pm + pn; gpm = pm; gpn = pn;
+                }
+            }
+            // Default distribution heuristic:
+            //   * an even 2D grid with pn>1 (mode 4) when one exists -> best
+            //     balance + least bandwidth (192/224/256: +1..5%);
+            //   * else 2D 8-row x n_tile collapse (mode 2) when mblk does not
+            //     divide num_threads -> rebalances the M-split straggler
+            //     (200/208/240: +8..23%);
+            //   * else pure M-split (mode 0) -> best full-N inner locality.
+            // I8_SVE_HYBMT overrides for experimentation
+            // (0=M-split 1=N-split 2=2D-collapse 3=balanced-band 4=2D-grid).
+            // Only deviate from M-split once the shape is large enough that
+            // rebalancing/bandwidth gains outweigh the extra OMP overhead and
+            // smaller inner tiles. Below ~128 in either dim, plain M-split is
+            // fastest (measured on V1: 64/96/112 cubes regress with grid/2D).
+            const int big = (M >= 128 && N_r >= 128);
+            const char *mtenv = getenv("I8_SVE_HYBMT");
+            int mtmode = mtenv ? atoi(mtenv)
+                       : (!big ? 0
+                          : gpn > 1 ? 4
+                          : (mblk % num_threads != 0 ? 2 : 0));
+            if (mtmode == 4 && gpn == 0) {   // env-forced grid: derive factors
+                gpn = (num_threads % 2 == 0 && nt >= 2) ? 2 : 1;
+                gpm = num_threads / gpn;
+            }
+            if (mtmode == 1) {
+                // N-split: each thread owns a group of N-panels and sweeps all
+                // M rows. The B-panel (K_r x n_tile) stays L1-resident while A
+                // streams, instead of every thread re-streaming the full B.
+                #pragma omp parallel for num_threads(num_threads) schedule(static)
+                for (int t = 0; t < nt; t++) {
+                    gemm_params_t pp = {M, K_r, n_tile, K_r, K_r, N_r};
+                    i8gemm_k_hybrid(A, B_reo + (size_t)t * K_r * n_tile,
+                                    C + (size_t)t * n_tile, NULL, &pp);
+                }
+            } else if (mtmode == 2) {
+                // 2D (M x N) blocking: flatten (n-panel, m-block) with n outer
+                // so a static contiguous chunk per thread is N-major -> B-panel
+                // reuse across the m-blocks a thread holds. Balances better than
+                // pure M- or N-split when M/8 or nt is not a multiple of P.
+                long total = (long)nt * mblk;
+                #pragma omp parallel for num_threads(num_threads) schedule(static)
+                for (long it = 0; it < total; it++) {
+                    int t = (int)(it / mblk);
+                    int mi = (int)(it % mblk);
+                    int m0 = mi * 8;
+                    int mb = M - m0 < 8 ? M - m0 : 8;
+                    gemm_params_t pp = {mb, K_r, n_tile, K_r, K_r, N_r};
+                    i8gemm_k_hybrid(A + (size_t)m0 * K_r,
+                                    B_reo + (size_t)t * K_r * n_tile,
+                                    C + (size_t)m0 * N_r + (size_t)t * n_tile,
+                                    NULL, &pp);
+                }
+            } else if (mtmode == 3) {
+                // Balanced contiguous M-band split: partition M into one nearly
+                // equal contiguous row-band per thread (rounded to 8-row units),
+                // instead of round-robining 8-row blocks. Removes the load
+                // imbalance that pure 8-row M-split has when M/8 is not a
+                // multiple of P, while keeping full-N inner locality.
+                int q = mblk / num_threads;
+                int rem = mblk % num_threads;
+                #pragma omp parallel num_threads(num_threads)
+                {
+                    int tid = omp_get_thread_num();
+                    int blk0 = tid * q + (tid < rem ? tid : rem);
+                    int nblk = q + (tid < rem ? 1 : 0);
+                    int m0 = blk0 * 8;
+                    int m1 = (blk0 + nblk) * 8;
+                    if (m1 > M) m1 = M;
+                    if (m0 < m1) {
+                        gemm_params_t pp = {m1 - m0, K_r, N_r, K_r, K_r, N_r};
+                        i8gemm_k_hybrid(A + (size_t)m0 * K_r, B_reo,
+                                        C + (size_t)m0 * N_r, NULL, &pp);
+                    }
+                }
+            } else if (mtmode == 4) {
+                // 2D thread grid (pm x pn): each thread owns a contiguous
+                // M-band AND a contiguous N-band. A-band is shared by pn
+                // threads, B-band by pm threads, so aggregate LLC/DRAM traffic
+                // is pn*|A| + pm*|B| vs M-split's |A| + P*|B|. For P=8 a 4x2
+                // grid roughly halves it -> helps when bandwidth-bound.
+                int pn = gpn, pm = gpm;
+                #pragma omp parallel num_threads(num_threads)
+                {
+                    int tid = omp_get_thread_num();
+                    int pr = tid % pm, pc = tid / pm;
+                    int bq = mblk / pm, br = mblk % pm;
+                    int b0 = pr * bq + (pr < br ? pr : br);
+                    int nb = bq + (pr < br ? 1 : 0);
+                    int tq = nt / pn, tr = nt % pn;
+                    int t0 = pc * tq + (pc < tr ? pc : tr);
+                    int ntb = tq + (pc < tr ? 1 : 0);
+                    int m0 = b0 * 8, m1 = (b0 + nb) * 8;
+                    if (m1 > M) m1 = M;
+                    int n0 = t0 * n_tile, ncols = ntb * n_tile;
+                    if (m0 < m1 && ncols > 0) {
+                        gemm_params_t pp = {m1 - m0, K_r, ncols, K_r, K_r, N_r};
+                        i8gemm_k_hybrid(A + (size_t)m0 * K_r,
+                                        B_reo + (size_t)t0 * K_r * n_tile,
+                                        C + (size_t)m0 * N_r + n0, NULL, &pp);
+                    }
+                }
+            } else {
+                #pragma omp parallel for num_threads(num_threads) schedule(static)
+                for (int m0 = 0; m0 < M; m0 += 8) {
+                    int mb = M - m0 < 8 ? M - m0 : 8;
+                    gemm_params_t pp = {mb, K_r, N_r, K_r, K_r, N_r};
+                    i8gemm_k_hybrid(A + (size_t)m0 * K_r, B_reo,
+                                    C + (size_t)m0 * N_r, NULL, &pp);
+                }
             }
         }
         return;
