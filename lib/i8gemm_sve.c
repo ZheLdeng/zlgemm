@@ -25,11 +25,36 @@ static void *aligned_alloc_64(size_t size) {
     return aligned_alloc(64, round_up_64(size));
 }
 
+// Per-thread cached scratch for the A-reorder pools. The public dispatch packs
+// A on every call; using a thread-local growing buffer removes the per-call
+// aligned_alloc/free that dominated small-shape latency. At most two pools are
+// live at once (primary = m12 or main, plus the m12 tail), so two slots suffice.
+// Buffers are owned by the calling (master) thread; the OpenMP workers only
+// write disjoint regions of an already-captured pointer, so this is race-free.
+static __thread i8_t *g_a_poolA = NULL;
+static __thread size_t g_a_capA = 0;
+static __thread i8_t *g_a_poolB = NULL;
+static __thread size_t g_a_capB = 0;
+
+static i8_t *i8_scratch(i8_t **slot, size_t *cap, size_t n) {
+    if (n == 0)
+        return *slot;
+    if (n > *cap) {
+        free(*slot);
+        *slot = (i8_t *)aligned_alloc_64(n);
+        *cap = *slot ? round_up_64(n) : 0;
+    }
+    return *slot;
+}
+
 static int i8_sve_segments(void) {
     return (int)(svcntb() / 16);
 }
 
 static int i8_sve_n_tile(void) {
+    const char *env = getenv("I8_SVE_N3");
+    if (env && atoi(env) != 0)
+        return 3 * (int)svcntw();
     return i8_sve_segments() * 8;
 }
 
@@ -86,11 +111,43 @@ static int i8_sve_use_n_split(int M, int K_r, int N_r, int n_tiles,
     if (M / 8 < num_threads)
         return 1;
 
+    /*
+     * ACL's I8 selector often moves medium shapes away from a pure M-split
+     * interleaved path.  On this platform, SVE I8 shapes around K,N >= 512
+     * and M <= 512 benefit from N-split even when the packed-B panel is below
+     * the old 512 KiB threshold: the A reorder is reused across N tiles and
+     * the work distribution is much steadier across 4/8 cores.
+     */
+    if (M <= 512 && K_r >= 512 && N_r >= 512)
+        return 1;
+
     const size_t b_panel_bytes = (size_t)K_r * (size_t)N_r * sizeof(i8_t);
     return b_panel_bytes >= 512u * 1024u && N_r >= M * 2;
 }
 
 void i8_pack_B(const i8_t *B, i8_t *B_reo, int K, int N) {
+    const char *n3_env = getenv("I8_SVE_N3");
+    if (n3_env && atoi(n3_env) != 0) {
+        const int segs = i8_sve_segments();
+        const int n_tile = segs * 12;
+        int idx = 0;
+
+        for (int nb = 0; nb < N; nb += n_tile) {
+            for (int rb = 0; rb < K / 8; rb++) {
+                int row_base = rb * 8;
+                for (int cp = 0; cp < 6; cp++) {
+                    for (int sg = 0; sg < segs; sg++) {
+                        int col_base = nb + sg * 12 + cp * 2;
+                        for (int j = 0; j < 2; j++)
+                            for (int i = 0; i < 8; i++)
+                                B_reo[idx++] = B[(row_base + i) * N + col_base + j];
+                    }
+                }
+            }
+        }
+        return;
+    }
+
     const int segs = i8_sve_segments();
     const int n_tile = segs * 8;
     int idx = 0;
@@ -117,6 +174,8 @@ void i8gemm_k_nld(const i8_t *A, const i8_t *B_reo, i32_t *C,
                   i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_nld_m12(const i8_t *A, const i8_t *B_reo, i32_t *C,
                       i8_t *A_reorder, const gemm_params_t *params);
+void i8gemm_k_nld_n3(const i8_t *A, const i8_t *B_reo, i32_t *C,
+                     i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_ld1(const i8_t *A, const i8_t *B_reo, i32_t *C,
                   i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_nld1(const i8_t *A, const i8_t *B_reo, i32_t *C,
@@ -151,6 +210,39 @@ void i8gemm_k_ld4_bias_f(const i8_t *A, const i8_t *B_reo, f32_t *C,
                          const f32_t *bias);
 void i8_pack_A_neon_m8_asm(const i8_t *A, i8_t *P, int K_r, int lda);
 
+// Small-shape hybrid kernel: reads A directly (no reorder pass), contiguous
+// deinterleave store. Defined in i8gemm_hybrid.S.
+void i8gemm_k_hybrid(const i8_t *A, const i8_t *B_reo, i32_t *C,
+                     i8_t *unused, const gemm_params_t *params);
+
+// Route to the hybrid (no-pack) kernel for tiny shapes where the A-reorder
+// pass + per-tile overhead dominate. Crossover measured on Neoverse-V1: the
+// hybrid wins for small M and small/medium K; the packed path wins once K or M
+// grows enough to amortize the pack and exploit contiguous packed A loads.
+static int i8_use_hybrid_for_shape(int M, int K_r, int N_r, int num_threads) {
+    const char *env = getenv("I8_SVE_HYBRID");
+    if (env)
+        return atoi(env) != 0;
+    if (num_threads >= 2) {
+        // Multi-thread: the packed path pays a separate A-reorder OpenMP region
+        // whose fork overhead dominates at small per-thread work, so the hybrid
+        // (no pack pass, clean M-split / N-split) scales much better for any
+        // shape with a small K and M. Large K/M keep the packed path (better
+        // B reuse and contiguous packed-A loads amortize there). N is
+        // unrestricted here: large-N small-M/K shapes benefit most.
+        return K_r <= 256 && M <= 256;
+    }
+    // Single thread: hybrid only helps the tiniest shapes (no pack pass to
+    // amortize); for larger N the packed path's contiguous A wins.
+    if (N_r > 256)
+        return 0;
+    if (K_r <= 128 && M <= 64)
+        return 1;
+    if (M <= 16 && K_r <= 256)
+        return 1;
+    return 0;
+}
+
 static size_t i8_a_reorder_stride(int K_r) {
     return (size_t)K_r * 8u;
 }
@@ -160,6 +252,9 @@ static size_t i8_a_reorder_stride_m12(int K_r) {
 }
 
 static int i8_use_a_reorder_for_shape(int K_r, int n_tiles) {
+    const char *n3_env = getenv("I8_SVE_N3");
+    if (n3_env && atoi(n3_env) != 0)
+        return 1;
     const char *env = getenv("I8_SVE_NO_A_REORDER");
     if (env && atoi(env) != 0)
         return 0;
@@ -167,10 +262,53 @@ static int i8_use_a_reorder_for_shape(int K_r, int n_tiles) {
 }
 
 static int i8_use_m12_for_shape(int M, int K_r, int n_tiles) {
+    const char *n3_env = getenv("I8_SVE_N3");
+    if (n3_env && atoi(n3_env) != 0)
+        return 0;
     const char *env = getenv("I8_SVE_NO_M12");
     if (env && atoi(env) != 0)
         return 0;
     return M >= 12 && K_r >= 64 && n_tiles > 1;
+}
+
+// Pick how many 12-row (m12) blocks to use, leaving the remainder to the
+// 8-row kernel. The m12 kernel (12x2VL, 24 accumulators) has a better
+// load:compute ratio than the 8x2VL kernel, but partial tail blocks always
+// run a full 8-row pass, so an M like 16 wastes half of a 4-row tail.
+//
+// Cost model (single full kernel pass, compute-bound):
+//   time(b) ~= b * 12 / eff12 + ceil((M - 12b) / 8) * 8 / eff8
+// with measured eff12 ~= 0.83 and eff8 ~= 0.70 on Neoverse-V1. Scaling by
+// eff12*eff8 gives the integer comparison cost below. We minimise over the
+// number of m12 blocks b, which lets the selector fall back to pure 8-row
+// blocking (b=0) for shapes such as M=13..16 and choose mixed blocking such
+// as 12+8+8 for M=28, both of which beat the old "always floor(M/12)" rule.
+static int i8_m12_block_count(int M) {
+    const char *env = getenv("I8_SVE_M12_BLOCKS");
+    if (env) {
+        int v = atoi(env);
+        if (v < 0)
+            v = 0;
+        if (v > M / 12)
+            v = M / 12;
+        return v;
+    }
+
+    const int eff12 = 83;   // m12 (12x2VL) full-pass efficiency, percent
+    const int eff8 = 70;    // 8x2VL full-pass efficiency, percent
+    const int max_b = M / 12;
+    int best_b = 0;
+    long best_cost = -1;
+    for (int b = 0; b <= max_b; b++) {
+        int tail = M - 12 * b;
+        int tail_blocks = (tail + 7) / 8;
+        long cost = (long)b * 12 * eff8 + (long)tail_blocks * 8 * eff12;
+        if (best_cost < 0 || cost < best_cost) {
+            best_cost = cost;
+            best_b = b;
+        }
+    }
+    return best_b;
 }
 
 static void i8_pack_A_sve_block(const i8_t *A, i8_t *A_reo,
@@ -215,10 +353,9 @@ static void i8_pack_A_sve_m12_block(const i8_t *A, i8_t *A_reo,
 }
 
 static i8_t *i8_prepare_A_reorder_pool(const i8_t *A, int M, int K_r,
-                                       int num_threads) {
+                                       int num_threads, i8_t *pool) {
     const int blocks = (M + 7) / 8;
     const size_t stride = i8_a_reorder_stride(K_r);
-    i8_t *pool = (i8_t *)aligned_alloc_64((size_t)blocks * stride);
     if (!pool)
         return NULL;
 
@@ -233,10 +370,9 @@ static i8_t *i8_prepare_A_reorder_pool(const i8_t *A, int M, int K_r,
 }
 
 static i8_t *i8_prepare_A_reorder_pool_m12(const i8_t *A, int M, int K_r,
-                                           int num_threads) {
+                                           int num_threads, i8_t *pool) {
     const int blocks = M / 12;
     const size_t stride = i8_a_reorder_stride_m12(K_r);
-    i8_t *pool = (i8_t *)aligned_alloc_64((size_t)blocks * stride);
     if (!pool)
         return NULL;
 
@@ -252,6 +388,12 @@ static void i8_dispatch_i32(const i8_t *A, const i8_t *B_reo, i32_t *C,
                             int M, int K_r, int N_r, int ldc,
                             int no_load, i8_t *A_reorder) {
     gemm_params_t p = {M, K_r, N_r, K_r, K_r, ldc};
+    const char *n3_env = getenv("I8_SVE_N3");
+    if (no_load && A_reorder && n3_env && atoi(n3_env) != 0) {
+        i8gemm_k_nld_n3(A, B_reo, C, A_reorder, &p);
+        return;
+    }
+
     if (no_load) {
         if (M <= 1)
             i8gemm_k_nld1(A, B_reo, C, A_reorder, &p);
@@ -311,22 +453,55 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
     const int n_tile = i8_sve_n_tile();
     const int n_tiles = N_r / n_tile;
     num_threads = i8_sve_effective_threads(num_threads, M, n_tiles);
+
+    if (i8_use_hybrid_for_shape(M, K_r, N_r, num_threads)) {
+        if (num_threads <= 1) {
+            gemm_params_t p = {M, K_r, N_r, K_r, K_r, N_r};
+            i8gemm_k_hybrid(A, B_reo, C, NULL, &p);
+        } else if (M <= 8) {
+            // Too few rows to M-split: split the N tiles across threads.
+            int nt = N_r / n_tile;
+            #pragma omp parallel for num_threads(num_threads) schedule(static)
+            for (int t = 0; t < nt; t++) {
+                gemm_params_t pp = {M, K_r, n_tile, K_r, K_r, N_r};
+                i8gemm_k_hybrid(A, B_reo + (size_t)t * K_r * n_tile,
+                                C + (size_t)t * n_tile, NULL, &pp);
+            }
+        } else {
+            #pragma omp parallel for num_threads(num_threads) schedule(static)
+            for (int m0 = 0; m0 < M; m0 += 8) {
+                int mb = M - m0 < 8 ? M - m0 : 8;
+                gemm_params_t pp = {mb, K_r, N_r, K_r, K_r, N_r};
+                i8gemm_k_hybrid(A + (size_t)m0 * K_r, B_reo,
+                                C + (size_t)m0 * N_r, NULL, &pp);
+            }
+        }
+        return;
+    }
+
     const int use_n_split =
         i8_sve_use_n_split(M, K_r, N_r, n_tiles, num_threads);
     const int use_a_reorder = i8_use_a_reorder_for_shape(K_r, n_tiles);
     const size_t a_stride = i8_a_reorder_stride(K_r);
-    const int use_m12 = use_a_reorder && i8_use_m12_for_shape(M, K_r, n_tiles);
-    const int m12_blocks = use_m12 ? M / 12 : 0;
+    const int m12_allowed = use_a_reorder && i8_use_m12_for_shape(M, K_r, n_tiles);
+    const int m12_blocks = m12_allowed ? i8_m12_block_count(M) : 0;
+    const int use_m12 = m12_blocks > 0;
     const int m12_rows = m12_blocks * 12;
     const int tail_M = M - m12_rows;
     const size_t a_stride_m12 = i8_a_reorder_stride_m12(K_r);
     i8_t *A_reo_m12_pool = use_m12 ?
-        i8_prepare_A_reorder_pool_m12(A, m12_rows, K_r, num_threads) : NULL;
+        i8_prepare_A_reorder_pool_m12(A, m12_rows, K_r, num_threads,
+            i8_scratch(&g_a_poolA, &g_a_capA,
+                       (size_t)m12_blocks * a_stride_m12)) : NULL;
     i8_t *A_reo_tail_pool = use_a_reorder && tail_M > 0 ?
         i8_prepare_A_reorder_pool(A + (size_t)m12_rows * K_r,
-                                  tail_M, K_r, num_threads) : NULL;
+                                  tail_M, K_r, num_threads,
+            i8_scratch(&g_a_poolB, &g_a_capB,
+                       (size_t)((tail_M + 7) / 8) * a_stride)) : NULL;
     i8_t *A_reo_pool = use_a_reorder && !use_m12 ?
-        i8_prepare_A_reorder_pool(A, M, K_r, num_threads) : NULL;
+        i8_prepare_A_reorder_pool(A, M, K_r, num_threads,
+            i8_scratch(&g_a_poolA, &g_a_capA,
+                       (size_t)((M + 7) / 8) * a_stride)) : NULL;
 
     if (!use_n_split) {
         if (use_m12) {
@@ -389,9 +564,7 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
         }
     }
 
-    free(A_reo_m12_pool);
-    free(A_reo_tail_pool);
-    free(A_reo_pool);
+    /* A-reorder pools live in thread-local cached scratch; do not free. */
 }
 
 void i8gemm_mt_dispatch_f(const i8_t *A, const i8_t *B_reo,
@@ -405,7 +578,9 @@ void i8gemm_mt_dispatch_f(const i8_t *A, const i8_t *B_reo,
     const int use_a_reorder = i8_use_a_reorder_for_shape(K_r, n_tiles);
     const size_t a_stride = i8_a_reorder_stride(K_r);
     i8_t *A_reo_pool = use_a_reorder ?
-        i8_prepare_A_reorder_pool(A, M, K_r, num_threads) : NULL;
+        i8_prepare_A_reorder_pool(A, M, K_r, num_threads,
+            i8_scratch(&g_a_poolA, &g_a_capA,
+                       (size_t)((M + 7) / 8) * a_stride)) : NULL;
 
     if (!use_n_split) {
         #pragma omp parallel for num_threads(num_threads) schedule(static)
@@ -426,7 +601,7 @@ void i8gemm_mt_dispatch_f(const i8_t *A, const i8_t *B_reo,
         }
     }
 
-    free(A_reo_pool);
+    /* cached scratch; do not free. */
 }
 
 void i8gemm_mt_dispatch_bias_f(const i8_t *A, const i8_t *B_reo,
@@ -440,7 +615,9 @@ void i8gemm_mt_dispatch_bias_f(const i8_t *A, const i8_t *B_reo,
     const int use_a_reorder = i8_use_a_reorder_for_shape(K_r, n_tiles);
     const size_t a_stride = i8_a_reorder_stride(K_r);
     i8_t *A_reo_pool = use_a_reorder ?
-        i8_prepare_A_reorder_pool(A, M, K_r, num_threads) : NULL;
+        i8_prepare_A_reorder_pool(A, M, K_r, num_threads,
+            i8_scratch(&g_a_poolA, &g_a_capA,
+                       (size_t)((M + 7) / 8) * a_stride)) : NULL;
 
     if (!use_n_split) {
         #pragma omp parallel for num_threads(num_threads) schedule(static)
@@ -462,7 +639,7 @@ void i8gemm_mt_dispatch_bias_f(const i8_t *A, const i8_t *B_reo,
         }
     }
 
-    free(A_reo_pool);
+    /* cached scratch; do not free. */
 }
 
 static int i8_prepare(const i8_t *A_orig, const i8_t *B_orig,

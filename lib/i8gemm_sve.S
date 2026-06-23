@@ -103,6 +103,75 @@
 	add x20, x20, #64
 	.endm
 
+	// ACL-style software-pipelined K8 step: compute the current 8x2VL block
+	// (A in z0..z3, B in z4..z7) while loading the next slice's B into
+	// z12..z15 and next A into z8..z11. Loads are interleaved between the
+	// smmla groups so the load units stay busy across the compute window and
+	// the loaded data is ready by the next iteration.
+	.macro MMLA_CUR_LDNEXT
+	smmla z16.s, z0.b, z4.b
+	smmla z17.s, z0.b, z5.b
+	ld1b z12.b, p0/z, [x6]
+	smmla z18.s, z0.b, z6.b
+	smmla z19.s, z0.b, z7.b
+	ld1b z13.b, p0/z, [x6, #1, mul vl]
+	smmla z20.s, z1.b, z4.b
+	smmla z21.s, z1.b, z5.b
+	ld1b z14.b, p0/z, [x6, #2, mul vl]
+	smmla z22.s, z1.b, z6.b
+	smmla z23.s, z1.b, z7.b
+	ld1b z15.b, p0/z, [x6, #3, mul vl]
+	addvl x6, x6, #4
+	smmla z24.s, z2.b, z4.b
+	smmla z25.s, z2.b, z5.b
+	ld1rqb z8.b, p0/z, [x20]
+	smmla z26.s, z2.b, z6.b
+	smmla z27.s, z2.b, z7.b
+	ld1rqb z9.b, p0/z, [x20, #16]
+	smmla z28.s, z3.b, z4.b
+	smmla z29.s, z3.b, z5.b
+	ld1rqb z10.b, p0/z, [x20, #32]
+	smmla z30.s, z3.b, z6.b
+	smmla z31.s, z3.b, z7.b
+	ld1rqb z11.b, p0/z, [x20, #48]
+	add x20, x20, #64
+	prfm pldl1keep, [x6, #512]
+	prfm pldl1keep, [x20, #256]
+	.endm
+
+	// Symmetric step: compute next block (A in z8..z11, B in z12..z15) while
+	// loading the following slice's B into z4..z7 and A into z0..z3.
+	.macro MMLA_NEXT_LDCUR
+	smmla z16.s, z8.b, z12.b
+	smmla z17.s, z8.b, z13.b
+	ld1b z4.b, p0/z, [x6]
+	smmla z18.s, z8.b, z14.b
+	smmla z19.s, z8.b, z15.b
+	ld1b z5.b, p0/z, [x6, #1, mul vl]
+	smmla z20.s, z9.b, z12.b
+	smmla z21.s, z9.b, z13.b
+	ld1b z6.b, p0/z, [x6, #2, mul vl]
+	smmla z22.s, z9.b, z14.b
+	smmla z23.s, z9.b, z15.b
+	ld1b z7.b, p0/z, [x6, #3, mul vl]
+	addvl x6, x6, #4
+	smmla z24.s, z10.b, z12.b
+	smmla z25.s, z10.b, z13.b
+	ld1rqb z0.b, p0/z, [x20]
+	smmla z26.s, z10.b, z14.b
+	smmla z27.s, z10.b, z15.b
+	ld1rqb z1.b, p0/z, [x20, #16]
+	smmla z28.s, z11.b, z12.b
+	smmla z29.s, z11.b, z13.b
+	ld1rqb z2.b, p0/z, [x20, #32]
+	smmla z30.s, z11.b, z14.b
+	smmla z31.s, z11.b, z15.b
+	ld1rqb z3.b, p0/z, [x20, #48]
+	add x20, x20, #64
+	prfm pldl1keep, [x6, #512]
+	prfm pldl1keep, [x20, #256]
+	.endm
+
 	.macro ZERO_ACC
 	mov z16.s, #0
 	mov z17.s, #0
@@ -149,6 +218,42 @@
 	mov z31.s, #0
 	.endm
 
+	.macro ZERO_ACC_N3
+	mov z8.s, #0
+	mov z9.s, #0
+	mov z10.s, #0
+	mov z11.s, #0
+	mov z12.s, #0
+	mov z13.s, #0
+	mov z14.s, #0
+	mov z15.s, #0
+	mov z16.s, #0
+	mov z17.s, #0
+	mov z18.s, #0
+	mov z19.s, #0
+	mov z20.s, #0
+	mov z21.s, #0
+	mov z22.s, #0
+	mov z23.s, #0
+	mov z24.s, #0
+	mov z25.s, #0
+	mov z26.s, #0
+	mov z27.s, #0
+	mov z28.s, #0
+	mov z29.s, #0
+	mov z30.s, #0
+	mov z31.s, #0
+	.endm
+
+	.macro MMLA_ROW_N3 areg, c0, c1, c2, c3, c4, c5
+	smmla \c0\().s, \areg\().b, z2.b
+	smmla \c1\().s, \areg\().b, z3.b
+	smmla \c2\().s, \areg\().b, z4.b
+	smmla \c3\().s, \areg\().b, z5.b
+	smmla \c4\().s, \areg\().b, z6.b
+	smmla \c5\().s, \areg\().b, z7.b
+	.endm
+
 	.macro MMLA_M12_4A
 	smmla z8.s,  z0.b, z4.b
 	smmla z12.s, z1.b, z4.b
@@ -189,11 +294,41 @@
 	ld1rqb z1.b, p0/z, [x20, #16]
 	ld1rqb z2.b, p0/z, [x20, #32]
 	ld1rqb z3.b, p0/z, [x20, #48]
-	MMLA_M12_4A
-	ld1rqb z0.b, p0/z, [x20, #64]
-	ld1rqb z1.b, p0/z, [x20, #80]
-	MMLA_M12_2A
+	// Compute the rows 4-7 contributions first (z2/z3). Once those smmla
+	prfm pldl1keep, [x6, #512]
+	prfm pldl1keep, [x20, #384]
+	// have issued, z2/z3 are free, so reload them with rows 8-11 and let the
+	// load overlap the rows 0-3 compute below. This removes the load-use
+	// stall the old "load rows 8-11 then immediately smmla" schedule had,
+	// without needing extra architectural registers (24 accumulators leave
+	// only z0-z7 for operands).
+	smmla z16.s, z2.b, z4.b
+	smmla z17.s, z2.b, z5.b
+	smmla z18.s, z2.b, z6.b
+	smmla z19.s, z2.b, z7.b
+	smmla z20.s, z3.b, z4.b
+	smmla z21.s, z3.b, z5.b
+	smmla z22.s, z3.b, z6.b
+	smmla z23.s, z3.b, z7.b
+	ld1rqb z2.b, p0/z, [x20, #64]   // rows 8-9
+	ld1rqb z3.b, p0/z, [x20, #80]   // rows 10-11
 	add x20, x20, #96
+	smmla z8.s,  z0.b, z4.b
+	smmla z9.s,  z0.b, z5.b
+	smmla z10.s, z0.b, z6.b
+	smmla z11.s, z0.b, z7.b
+	smmla z12.s, z1.b, z4.b
+	smmla z13.s, z1.b, z5.b
+	smmla z14.s, z1.b, z6.b
+	smmla z15.s, z1.b, z7.b
+	smmla z24.s, z2.b, z4.b
+	smmla z25.s, z2.b, z5.b
+	smmla z26.s, z2.b, z6.b
+	smmla z27.s, z2.b, z7.b
+	smmla z28.s, z3.b, z4.b
+	smmla z29.s, z3.b, z5.b
+	smmla z30.s, z3.b, z6.b
+	smmla z31.s, z3.b, z7.b
 	.endm
 
 	// Build element offsets for one column pair:
@@ -225,8 +360,8 @@
 	index z1.s, #0, #1
 	and z1.s, z1.s, #2
 	lsr z1.s, z1.s, #1
-	dup z0.s, w12
-	mul z1.s, p1/m, z1.s, z0.s
+	dup z2.s, w12
+	mul z1.s, p1/m, z1.s, z2.s
 	add \out\().s, \out\().s, z1.s
 	.endm
 
@@ -248,6 +383,34 @@
 	add z2.s, z2.s, #4
 	mov z3.d, z0.d
 	add z3.s, z3.s, #6
+	.endm
+
+	.macro BUILD_I32_STORE_OFFSETS_N3
+	index z0.s, #0, #1
+	lsr z0.s, z0.s, #2
+	mov z1.d, z0.d
+	lsl z0.s, z0.s, #3
+	lsl z1.s, z1.s, #2
+	add z0.s, z0.s, z1.s
+	index z1.s, #0, #1
+	and z1.s, z1.s, #1
+	add z0.s, z0.s, z1.s
+	index z1.s, #0, #1
+	and z1.s, z1.s, #2
+	lsr z1.s, z1.s, #1
+	dup z2.s, w12
+	mul z1.s, p1/m, z1.s, z2.s
+	add z0.s, z0.s, z1.s
+	mov z1.d, z0.d
+	add z1.s, z1.s, #2
+	mov z2.d, z0.d
+	add z2.s, z2.s, #4
+	mov z3.d, z0.d
+	add z3.s, z3.s, #6
+	mov z4.d, z0.d
+	add z4.s, z4.s, #8
+	mov z5.d, z0.d
+	add z5.s, z5.s, #10
 	.endm
 
 	// Build column offsets used by f32 stores once per N tile.
@@ -417,6 +580,60 @@
 	msub x18, x4, x12, x18
 	.endm
 
+	// Emit the 4 contiguous quad-stores for one deinterleaved row.
+	// z0=[c0-3|c8-11], z1=[c4-7|c12-15] (int32 accum); x7 = row byte addr.
+	// mode: i32 (raw), f32 (scvtf), bias (scvtf + per-col bias in z8..z11).
+	.macro DEINT_QUADS mode
+	.ifnc \mode, i32
+	scvtf z0.s, p1/m, z0.s
+	scvtf z1.s, p1/m, z1.s
+	.endif
+	mov z4.d, z0.d
+	ext z4.b, z4.b, z4.b, #16
+	mov z5.d, z1.d
+	ext z5.b, z5.b, z5.b, #16
+	.ifc \mode, bias
+	fadd z0.s, z0.s, z8.s
+	fadd z1.s, z1.s, z9.s
+	fadd z4.s, z4.s, z10.s
+	fadd z5.s, z5.s, z11.s
+	.endif
+	st1w z0.s, p2, [x7]
+	add x7, x7, #16
+	st1w z1.s, p2, [x7]
+	add x7, x7, #16
+	st1w z4.s, p2, [x7]
+	add x7, x7, #16
+	st1w z5.s, p2, [x7]
+	.endm
+
+	// Deinterleave-store one row-pair (rows 2*rp, 2*rp+1) of the 8x16 tile
+	// using contiguous st1w instead of scatter. The smmla 2x2 output is laid
+	// out (per accumulator) as [r0c0,r0c1,r1c0,r1c1 | r0c8,r0c9,r1c8,r1c9].
+	// trn1.d gathers the even (r0) col pairs, trn2.d the odd (r1); ext brings
+	// the high quad (cols 8-15) down so each store is a contiguous quad.
+	// x18 = tile base byte addr (C[m0][n0]); x12 = ldc; cnt = row count;
+	// p2 = VL4; x4/x7 scratch (x5 preserved for bias base).
+	.macro DEINT_STORE_PAIR mode, tag, cnt, rp, a0, a1, a2, a3
+	cmp \cnt, #(\rp * 2)
+	b.le .L_\tag\()_deint_\rp\()_done
+	trn1 z0.d, \a0\().d, \a1\().d
+	trn1 z1.d, \a2\().d, \a3\().d
+	mov x4, #(\rp * 2)
+	mul x7, x4, x12
+	add x7, x18, x7, lsl #2
+	DEINT_QUADS \mode
+	cmp \cnt, #(\rp * 2 + 1)
+	b.le .L_\tag\()_deint_\rp\()_done
+	trn2 z0.d, \a0\().d, \a1\().d
+	trn2 z1.d, \a2\().d, \a3\().d
+	mov x4, #(\rp * 2 + 1)
+	mul x7, x4, x12
+	add x7, x18, x7, lsl #2
+	DEINT_QUADS \mode
+.L_\tag\()_deint_\rp\()_done:
+	.endm
+
 	.macro STORE_ROW_I32_M12 rp, a0, a1, a2, a3
 	mov x4, #(\rp * 8)
 	madd x18, x4, x12, x18
@@ -439,6 +656,115 @@
 	msub x18, x4, x12, x18
 	.endm
 
+	.macro STORE_ROW_I32_N3 rp, a0, a1, a2, a3, a4, a5
+	mov x4, #(\rp * 8)
+	madd x18, x4, x12, x18
+	cmp x3, #(\rp * 2)
+	b.le .L_store_i32_n3_row_\rp\()_done
+	cmp x3, #(\rp * 2 + 1)
+	b.le .L_store_i32_n3_row_\rp\()_one
+	st1w \a0\().s, p1, [x18, z0.s, sxtw #2]
+	st1w \a1\().s, p1, [x18, z1.s, sxtw #2]
+	st1w \a2\().s, p1, [x18, z2.s, sxtw #2]
+	st1w \a3\().s, p1, [x18, z3.s, sxtw #2]
+	st1w \a4\().s, p1, [x18, z4.s, sxtw #2]
+	st1w \a5\().s, p1, [x18, z5.s, sxtw #2]
+	b .L_store_i32_n3_row_\rp\()_done
+.L_store_i32_n3_row_\rp\()_one:
+	st1w \a0\().s, p4, [x18, z0.s, sxtw #2]
+	st1w \a1\().s, p4, [x18, z1.s, sxtw #2]
+	st1w \a2\().s, p4, [x18, z2.s, sxtw #2]
+	st1w \a3\().s, p4, [x18, z3.s, sxtw #2]
+	st1w \a4\().s, p4, [x18, z4.s, sxtw #2]
+	st1w \a5\().s, p4, [x18, z5.s, sxtw #2]
+.L_store_i32_n3_row_\rp\()_done:
+	mov x4, #(\rp * 8)
+	msub x18, x4, x12, x18
+	.endm
+
+	.global i8gemm_k_nld_n3
+	.type i8gemm_k_nld_n3, %function
+i8gemm_k_nld_n3:
+	SAVE_REGS
+	mov x19, x3               // packed-A base
+
+	ldr w8, [x4, #0]          // M
+	ldr w9, [x4, #4]          // K
+	ldr w10, [x4, #8]         // N
+	ldr w12, [x4, #20]        // ldc
+
+	ptrue p0.b
+	ptrue p1.s
+	index z0.s, #0, #1
+	and z0.s, z0.s, #2
+	cmpeq p4.s, p1/z, z0.s, #0
+
+	cntw x13
+	mov x4, #3
+	mul x13, x13, x4         // n_tile = 3 * VL(int32)
+	mul x14, x9, x13         // packed-B N-tile stride in bytes
+
+	mov x15, #0              // m0
+.L_n3_m_loop:
+	cmp x15, x8
+	b.ge .L_n3_done
+	sub x3, x8, x15
+	cmp x3, #8
+	mov x18, #8
+	csel x3, x3, x18, le     // m_now = min(M - m0, 8)
+
+	mov x16, #0              // n0
+	mov x17, x1              // current B tile
+.L_n3_n_loop:
+	ZERO_ACC_N3
+	mov x4, x9
+	mov x6, x17
+	lsr x20, x15, #3
+	mul x20, x20, x9
+	add x20, x19, x20, lsl #3
+
+.L_n3_k_loop:
+	ld1b z2.b, p0/z, [x6]
+	ld1b z3.b, p0/z, [x6, #1, mul vl]
+	ld1b z4.b, p0/z, [x6, #2, mul vl]
+	ld1b z5.b, p0/z, [x6, #3, mul vl]
+	ld1b z6.b, p0/z, [x6, #4, mul vl]
+	ld1b z7.b, p0/z, [x6, #5, mul vl]
+	addvl x6, x6, #6
+
+	ld1rqb z0.b, p0/z, [x20]
+	MMLA_ROW_N3 z0, z8, z9, z10, z11, z12, z13
+	ld1rqb z0.b, p0/z, [x20, #16]
+	MMLA_ROW_N3 z0, z14, z15, z16, z17, z18, z19
+	ld1rqb z0.b, p0/z, [x20, #32]
+	MMLA_ROW_N3 z0, z20, z21, z22, z23, z24, z25
+	ld1rqb z0.b, p0/z, [x20, #48]
+	MMLA_ROW_N3 z0, z26, z27, z28, z29, z30, z31
+	add x20, x20, #64
+	subs x4, x4, #8
+	b.gt .L_n3_k_loop
+
+	BUILD_I32_STORE_OFFSETS_N3
+	madd x18, x15, x12, x16
+	add x18, x2, x18, lsl #2
+	STORE_ROW_I32_N3 0, z8, z9, z10, z11, z12, z13
+	STORE_ROW_I32_N3 1, z14, z15, z16, z17, z18, z19
+	STORE_ROW_I32_N3 2, z20, z21, z22, z23, z24, z25
+	STORE_ROW_I32_N3 3, z26, z27, z28, z29, z30, z31
+
+	add x16, x16, x13
+	add x17, x17, x14
+	cmp x16, x10
+	b.lt .L_n3_n_loop
+
+	add x15, x15, #8
+	b .L_n3_m_loop
+
+.L_n3_done:
+	RESTORE_REGS
+	ret
+	.size i8gemm_k_nld_n3, .-i8gemm_k_nld_n3
+
 	.global i8gemm_k_nld_m12
 	.type i8gemm_k_nld_m12, %function
 i8gemm_k_nld_m12:
@@ -452,6 +778,7 @@ i8gemm_k_nld_m12:
 
 	ptrue p0.b
 	ptrue p1.s
+	ptrue p2.s, vl4
 	index z0.s, #0, #1
 	and z0.s, z0.s, #2
 	cmpeq p4.s, p1/z, z0.s, #0
@@ -476,15 +803,14 @@ i8gemm_k_nld_m12:
 	subs x4, x4, #16
 	b.gt .L_m12_k_loop
 
-	BUILD_I32_STORE_OFFSETS_M12
 	mov x18, x16
 	add x18, x2, x18, lsl #2
-	STORE_ROW_I32_M12 0, z8, z9, z10, z11
-	STORE_ROW_I32_M12 1, z12, z13, z14, z15
-	STORE_ROW_I32_M12 2, z16, z17, z18, z19
-	STORE_ROW_I32_M12 3, z20, z21, z22, z23
-	STORE_ROW_I32_M12 4, z24, z25, z26, z27
-	STORE_ROW_I32_M12 5, z28, z29, z30, z31
+	DEINT_STORE_PAIR i32, m12, x8, 0, z8, z9, z10, z11
+	DEINT_STORE_PAIR i32, m12, x8, 1, z12, z13, z14, z15
+	DEINT_STORE_PAIR i32, m12, x8, 2, z16, z17, z18, z19
+	DEINT_STORE_PAIR i32, m12, x8, 3, z20, z21, z22, z23
+	DEINT_STORE_PAIR i32, m12, x8, 4, z24, z25, z26, z27
+	DEINT_STORE_PAIR i32, m12, x8, 5, z28, z29, z30, z31
 
 	add x16, x16, x13
 	add x17, x17, x14
@@ -507,28 +833,32 @@ i8gemm_k_nld_m12:
 	.endm
 
 	.macro STORE_C_I32 tag
-	BUILD_I32_STORE_OFFSETS
-	STORE_ROW_I32_FAST \tag, 0, z16, z17, z18, z19
-	STORE_ROW_I32_FAST \tag, 1, z20, z21, z22, z23
-	STORE_ROW_I32_FAST \tag, 2, z24, z25, z26, z27
-	STORE_ROW_I32_FAST \tag, 3, z28, z29, z30, z31
+	DEINT_STORE_PAIR i32, \tag, x3, 0, z16, z17, z18, z19
+	DEINT_STORE_PAIR i32, \tag, x3, 1, z20, z21, z22, z23
+	DEINT_STORE_PAIR i32, \tag, x3, 2, z24, z25, z26, z27
+	DEINT_STORE_PAIR i32, \tag, x3, 3, z28, z29, z30, z31
 	.endm
 
 	.macro STORE_C_F32 tag
-	BUILD_F32_STORE_OFFSETS
-	STORE_ROW_F32 \tag, 0, z16, z17, z18, z19
-	STORE_ROW_F32 \tag, 1, z20, z21, z22, z23
-	STORE_ROW_F32 \tag, 2, z24, z25, z26, z27
-	STORE_ROW_F32 \tag, 3, z28, z29, z30, z31
+	DEINT_STORE_PAIR f32, \tag, x3, 0, z16, z17, z18, z19
+	DEINT_STORE_PAIR f32, \tag, x3, 1, z20, z21, z22, z23
+	DEINT_STORE_PAIR f32, \tag, x3, 2, z24, z25, z26, z27
+	DEINT_STORE_PAIR f32, \tag, x3, 3, z28, z29, z30, z31
 	.endm
 
 	.macro STORE_C_F32_BIAS tag
-	add x6, x5, x16, lsl #2
-	BUILD_F32_STORE_OFFSETS
-	STORE_ROW_F32_BIAS \tag, 0, z16, z17, z18, z19
-	STORE_ROW_F32_BIAS \tag, 1, z20, z21, z22, z23
-	STORE_ROW_F32_BIAS \tag, 2, z24, z25, z26, z27
-	STORE_ROW_F32_BIAS \tag, 3, z28, z29, z30, z31
+	add x6, x5, x16, lsl #2          // bias base for this n-tile (cols n0..)
+	ld1w {z8.s}, p2/z, [x6]          // bias c0-3
+	add x6, x6, #16
+	ld1w {z9.s}, p2/z, [x6]          // bias c4-7
+	add x6, x6, #16
+	ld1w {z10.s}, p2/z, [x6]         // bias c8-11
+	add x6, x6, #16
+	ld1w {z11.s}, p2/z, [x6]         // bias c12-15
+	DEINT_STORE_PAIR bias, \tag, x3, 0, z16, z17, z18, z19
+	DEINT_STORE_PAIR bias, \tag, x3, 1, z20, z21, z22, z23
+	DEINT_STORE_PAIR bias, \tag, x3, 2, z24, z25, z26, z27
+	DEINT_STORE_PAIR bias, \tag, x3, 3, z28, z29, z30, z31
 	.endm
 
 	.macro GEMM_BODY func_name, load_c, store_c
@@ -546,6 +876,7 @@ i8gemm_k_nld_m12:
 
 	ptrue p0.b
 	ptrue p1.s
+	ptrue p2.s, vl4           // first 4 .s lanes (one 128-bit quad) for deint stores
 
 	index z0.s, #0, #1
 	and z0.s, z0.s, #2
@@ -613,13 +944,11 @@ i8gemm_k_nld_m12:
 	b.ge .L_\func_name\()_packed_tail_cur
 
 .L_\func_name\()_k_loop_packed:
-	LOAD_AB_PACKED_NEXT
-	MMLA_BLOCK z0, z1, z2, z3, z4, z5, z6, z7
+	MMLA_CUR_LDNEXT
 	add x4, x4, #8
 	cmp x4, x9
 	b.ge .L_\func_name\()_packed_tail_next
-	LOAD_AB_PACKED_CUR
-	MMLA_BLOCK z8, z9, z10, z11, z12, z13, z14, z15
+	MMLA_NEXT_LDCUR
 	add x4, x4, #8
 	cmp x4, x9
 	b.lt .L_\func_name\()_k_loop_packed

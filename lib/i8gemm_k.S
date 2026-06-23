@@ -111,6 +111,51 @@
 // LOAD_C / STORE_C  按行数特化
 // ════════════════════════════════════════════════════════════════════
 
+// ── zero-C fast path: public int32 dispatch documents C as zero-init.
+	.macro LOAD_ZERO_8
+	movi v9.4s, #0
+	movi v10.4s, #0
+	movi v11.4s, #0
+	movi v12.4s, #0
+	movi v13.4s, #0
+	movi v14.4s, #0
+	movi v15.4s, #0
+	movi v16.4s, #0
+	movi v17.4s, #0
+	movi v18.4s, #0
+	movi v19.4s, #0
+	movi v20.4s, #0
+	movi v21.4s, #0
+	movi v22.4s, #0
+	movi v23.4s, #0
+	movi v24.4s, #0
+	.endm
+
+	.macro LOAD_ZERO_4
+	movi v9.4s, #0
+	movi v10.4s, #0
+	movi v11.4s, #0
+	movi v12.4s, #0
+	movi v13.4s, #0
+	movi v14.4s, #0
+	movi v15.4s, #0
+	movi v16.4s, #0
+	.endm
+
+	.macro LOAD_ZERO_2
+	movi v9.4s, #0
+	movi v10.4s, #0
+	movi v11.4s, #0
+	movi v12.4s, #0
+	.endm
+
+	.macro LOAD_ZERO_1
+	movi v9.4s, #0
+	movi v10.4s, #0
+	movi v11.4s, #0
+	movi v12.4s, #0
+	.endm
+
 // ── m=8：从行主序 C 加载 8×8 int32 → blocked v9~v24 ──────────────
 	.macro LOAD_C_ROWMAJOR
 	add  x11, C_M_BASE, LDC_B             // 1*LDC
@@ -1125,6 +1170,12 @@ GEMM_BODY i8gemm_k_ld1, 1, 2, LOAD_C_1,        STORE_C_1,        2, 32, 1
 GEMM_BODY i8gemm_k_ld2, 2, 2, LOAD_C_2,        STORE_C_2,        2, 32, 1
 GEMM_BODY i8gemm_k_ld4, 4, 4, LOAD_C_4,        STORE_C_4,        2, 32, 1
 
+// int32 zero-C variants (skip C load, store int32 row-major)
+GEMM_BODY i8gemm_k_zero,  8, 8, LOAD_ZERO_8, STORE_C_ROWMAJOR, 2, 32, 1
+GEMM_BODY i8gemm_k_zero1, 1, 2, LOAD_ZERO_1, STORE_C_1,        2, 32, 1
+GEMM_BODY i8gemm_k_zero2, 2, 2, LOAD_ZERO_2, STORE_C_2,        2, 32, 1
+GEMM_BODY i8gemm_k_zero4, 4, 4, LOAD_ZERO_4, STORE_C_4,        2, 32, 1
+
 // fp32 store variants (_f suffix)
 GEMM_BODY i8gemm_k_ld_f,  8, 8, LOAD_C_ROWMAJOR_F, STORE_C_ROWMAJOR_F, 2, 32, 1
 GEMM_BODY i8gemm_k_ld1_f, 1, 2, LOAD_C_1_F,        STORE_C_1_F,        2, 32, 1
@@ -1136,6 +1187,11 @@ GEMM_BODY i8gemm_k_reo_ld,  8, 8, LOAD_C_ROWMAJOR, STORE_C_ROWMAJOR, 2, 32, 0
 GEMM_BODY i8gemm_k_reo_ld1, 1, 2, LOAD_C_1,        STORE_C_1,        2, 32, 0
 GEMM_BODY i8gemm_k_reo_ld2, 2, 2, LOAD_C_2,        STORE_C_2,        2, 32, 0
 GEMM_BODY i8gemm_k_reo_ld4, 4, 4, LOAD_C_4,        STORE_C_4,        2, 32, 0
+
+GEMM_BODY i8gemm_k_reo_zero,  8, 8, LOAD_ZERO_8, STORE_C_ROWMAJOR, 2, 32, 0
+GEMM_BODY i8gemm_k_reo_zero1, 1, 2, LOAD_ZERO_1, STORE_C_1,        2, 32, 0
+GEMM_BODY i8gemm_k_reo_zero2, 2, 2, LOAD_ZERO_2, STORE_C_2,        2, 32, 0
+GEMM_BODY i8gemm_k_reo_zero4, 4, 4, LOAD_ZERO_4, STORE_C_4,        2, 32, 0
 
 GEMM_BODY i8gemm_k_reo_ld_f,  8, 8, LOAD_C_ROWMAJOR_F, STORE_C_ROWMAJOR_F, 2, 32, 0
 GEMM_BODY i8gemm_k_reo_ld1_f, 1, 2, LOAD_C_1_F,        STORE_C_1_F,        2, 32, 0
