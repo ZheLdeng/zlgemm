@@ -31,9 +31,16 @@ typedef struct {
 extern void i8gemm_k_ld(const int8_t *A, const int8_t *B_reo,
                         int32_t *C, int8_t *A_reorder,
                         const gemm_params_t *params);
+#if I8_BENCH_SVE_PACK
+/* The SVE kernel set (i8gemm_sve.S) has no separate prepacked symbol; its
+ * load-path kernel i8gemm_k_ld already handles the A_reorder pointer. Alias
+ * reo_ld to it so the SVE parts build links (NEON keeps its own reo_ld). */
+#define i8gemm_k_reo_ld i8gemm_k_ld
+#else
 extern void i8gemm_k_reo_ld(const int8_t *A, const int8_t *B_reo,
                             int32_t *C, int8_t *A_reorder,
                             const gemm_params_t *params);
+#endif
 
 static int g_prepacked_a = 0;
 
