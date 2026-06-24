@@ -736,6 +736,12 @@ for line in lines:
     if "no_store" in flags and stripped.startswith("STORE_ROW_I32_FAST "):
         out.append("//" + line)
         continue
+    # Current i8gemm_sve.S stores C through the deinterleave-store macro
+    # DEINT_STORE_PAIR (see STORE_C_I32/STORE_C_F32); the STORE_ROW* names
+    # above are legacy. Match it so no_store actually removes the C store.
+    if "no_store" in flags and stripped.startswith("DEINT_STORE_PAIR "):
+        out.append("//" + line)
+        continue
     if "no_ab_load" in flags:
         if stripped.startswith("ld1b z4.b") or stripped.startswith("ld1b z5.b"):
             out.append("//" + line)
@@ -1099,6 +1105,7 @@ build_tail_full() {
                 "$CC" $OPT_FLAGS $ARCH_FLAGS $OMP_FLAGS $INCLUDE_FLAGS "$TAIL_BENCH" \
                 "$LIB_DIR/bf16gemm_sve.c" "$LIB_DIR/bf16gemm_sve.S" \
                 "$LIB_DIR/i8gemm_sve.c" "$LIB_DIR/i8gemm_sve.S" \
+                "$LIB_DIR/i8gemm_hybrid.S" \
                 "$LIB_DIR/i8gemm_pack_a_neon.S" \
                 -o "$bin" -lm
             ;;
@@ -1120,6 +1127,8 @@ build_dispatch() {
                 "$DISPATCH_BENCH" \
                 "$LIB_DIR/bf16gemm_sve.c" "$LIB_DIR/bf16gemm_sve.S" \
                 "$LIB_DIR/i8gemm_sve.c" "$LIB_DIR/i8gemm_sve.S" \
+                "$LIB_DIR/i8gemm_hybrid.S" \
+                "$LIB_DIR/i8gemm_m16n4.c" "$LIB_DIR/i8gemm_m16n4.S" \
                 "$LIB_DIR/i8gemm_pack_a_neon.S" \
                 -o "$bin" -lm
             ;;
