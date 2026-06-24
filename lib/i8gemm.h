@@ -58,6 +58,12 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
                          i32_t *C, int M, int K_r, int N_r,
                          int nthreads);
 
+// Experimental NEON I8MM 16x4 dispatch.
+// Uses the same B_reo layout as i8_pack_B and writes int32 row-major C.
+void i8gemm_mt_dispatch_m16n4(const i8_t *A, const i8_t *B_reo,
+                              i32_t *C, int M, int K_r, int N_r,
+                              int nthreads);
+
 // fp32 output (int32 accumulator → scvtf on store)
 void i8gemm_mt_dispatch_f(const i8_t *A, const i8_t *B_reo,
                            f32_t *C, int M, int K_r, int N_r,

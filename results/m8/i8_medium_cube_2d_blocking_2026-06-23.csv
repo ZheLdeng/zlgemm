@@ -1,0 +1,24 @@
+# i8 medium-cube @8 threads: 2D thread-grid / 2D-collapse distribution for the hybrid path
+# Neoverse-V1, 8 cores @2.6GHz, peak i8 smmla = 661 GOPS/core. GOPS = 2*M*K*N*reps/time.
+# baseline = pure 8-row M-split (I8_SVE_HYBMT=0); new = auto distribution heuristic (default).
+# Heuristic (hybrid path, M>8, M>=128 && N_r>=128 only):
+#   - even 2D grid pm x pn (=num_threads) dividing both mblk and nt -> mode 4 (grid)
+#   - else mblk %% num_threads != 0 -> mode 2 (8-row x n_tile 2D collapse, rebalances)
+#   - else -> mode 0 (M-split, best full-N locality)
+# Below 128 in either dim: plain M-split (grid/2D add overhead, measured regressions).
+# runs=8 best-of, warmup=25, reps=100. Numbers GOPS.
+shape,baseline_msplit,new_default,acl,new_over_acl,base_over_acl,distribution_chosen
+128x128x128,1240.4,1253.2,930.7,1.347,1.333,grid_4x2
+160x160x160,1393.1,1603.2,1622.0,0.988,0.859,grid_4x2
+192x192x192,1788.5,1852.9,1899.6,0.975,0.942,grid_4x2
+200x200x200,1404.5,1664.2,1748.2,0.952,0.803,2d_collapse
+208x208x208,1578.3,1794.5,1888.5,0.950,0.836,2d_collapse
+224x224x224,1703.7,1947.7,2073.1,0.940,0.822,grid_4x2
+240x240x240,1810.1,1909.7,2077.4,0.919,0.871,2d_collapse
+256x256x256,1935.7,2061.4,2313.3,0.891,0.837,grid_4x2
+# Thread-scaling sanity (256^3, new vs M-split): t2 686/685, t4 1208/1122 (+8%),
+# t6 1524/1379 (+11%), t8 2044/1934 (+6%). Win holds/grows at all thread counts.
+# Non-square spot-checks (new vs M-split): 256x128x256 1804/1756, 128x256x256 1910/1822,
+# 256x256x128 1930/1861, 200x256x224 1854/1551 (+20%). All improve or tie.
+# Residual gap vs ACL concentrated at 256^3 (0.89): aggregate A+B LLC bandwidth bound;
+# ACL's sve_hybrid_s8s32_mmla_6x4VL likely has better prefetch/K-streaming.

@@ -1,0 +1,13 @@
+# Prepacked in-L1 microkernel ceiling, single core, Neoverse-V1, peak=661 GOPS/core
+# Measured 2026-06-23. NEON via i8gemm_k_reo_ld (first_n=0, cached path, 8x8 tile K16);
+# SVE via i8gemm_k_nld_m12 (12x16 tile). B layout is throughput-irrelevant (load addrs fixed).
+kernel,tile,M,N,K,GOPS,pct_peak
+neon_k_reo_ld,8x8,8,16,2048,518.6,78.4
+neon_k_reo_ld,8x8,8,32,1024,514.7,77.8
+neon_k_reo_ld,8x8,8,64,512,499.8,75.6
+neon_k_reo_ld,8x8,8,128,256,454.7,68.8
+sve_k_nld_m12,12x16,12,16,2048,593.3,89.7
+sve_k_nld_m12,12x16,12,16,1536,589.3,89.1
+sve_k_nld_m12,12x16,12,16,1024,578.9,87.6
+sve_k_nld_m12,12x16,12,16,512,550.9,83.3
+sve_k_nld_m12,12x16,12,16,256,502.0,75.9

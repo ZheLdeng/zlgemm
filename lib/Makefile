@@ -23,6 +23,7 @@ SVE_OBJS := \
 	$(BUILD_DIR)/bf16gemm_sve_asm.o \
 	$(BUILD_DIR)/i8gemm_sve_c.o \
 	$(BUILD_DIR)/i8gemm_sve_asm.o \
+	$(BUILD_DIR)/i8gemm_hybrid.o \
 	$(BUILD_DIR)/i8gemm_pack_a_neon.o
 
 NEON_OBJS := \
@@ -59,6 +60,9 @@ $(BUILD_DIR)/i8gemm_sve_c.o: i8gemm_sve.c i8gemm.h gemm_params.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/i8gemm_sve_asm.o: i8gemm_sve.S gemm_params.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/i8gemm_hybrid.o: i8gemm_hybrid.S gemm_params.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/bf16gemm_mt.o: bf16gemm_mt.c bf16gemm.h gemm_params.h | $(BUILD_DIR)

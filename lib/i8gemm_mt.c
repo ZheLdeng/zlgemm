@@ -89,8 +89,55 @@ static int i8_use_n_split(int M, int K_r, int N_r, int n_tiles,
     if (M / 8 < num_threads)
         return 1;
 
+    /*
+     * ACL-style probing shows that medium-M, wide-N NEON I8 shapes should not
+     * always move to pure N-split just because the packed-B panel is large.
+     * With 4/8 cores, M-split keeps each worker on a long contiguous N sweep
+     * and avoids repeating the M sweep per N shard.  This fixes shapes such as
+     * 128x512x1024 and 256x512x1024, where old N-split under-scaled badly.
+     */
+    if (num_threads >= 4 && M >= 128 && M <= 256 &&
+        K_r >= 512 && N_r <= M * 8)
+        return 0;
+
     const size_t b_panel_bytes = (size_t)K_r * (size_t)N_r * sizeof(i8_t);
     return b_panel_bytes >= 512u * 1024u && N_r >= M * 2;
+}
+
+static int i8_requested_2d_split(void) {
+    const char *split = getenv("I8_GEMM_SPLIT");
+    return split && strcmp(split, "2d") == 0;
+}
+
+static void i8_split_2d_threads(int max_threads, int m_work, int n_work,
+                                int *m_threads, int *n_threads) {
+    if (max_threads < 1)
+        max_threads = 1;
+    if (m_work < 1)
+        m_work = 1;
+    if (n_work < 1)
+        n_work = 1;
+
+    int best_m = 1;
+    int best_n = max_threads;
+    double best_score = 1.0e300;
+    for (int mt = 1; mt <= max_threads; mt++) {
+        if (max_threads % mt != 0)
+            continue;
+        int nt = max_threads / mt;
+        if (mt > m_work || nt > n_work)
+            continue;
+        double m_per = (double)m_work / (double)mt;
+        double n_per = (double)n_work / (double)nt;
+        double score = m_per > n_per ? m_per / n_per : n_per / m_per;
+        if (score < best_score) {
+            best_score = score;
+            best_m = mt;
+            best_n = nt;
+        }
+    }
+    *m_threads = best_m;
+    *n_threads = best_n;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -108,6 +155,18 @@ void i8gemm_k_ld2(const i8_t *A, const i8_t *B_reo,
 void i8gemm_k_ld4(const i8_t *A, const i8_t *B_reo,
                   i32_t *C, i8_t *A_reorder,
                   const gemm_params_t *params);
+void i8gemm_k_zero (const i8_t *A, const i8_t *B_reo,
+                    i32_t *C, i8_t *A_reorder,
+                    const gemm_params_t *params);
+void i8gemm_k_zero1(const i8_t *A, const i8_t *B_reo,
+                    i32_t *C, i8_t *A_reorder,
+                    const gemm_params_t *params);
+void i8gemm_k_zero2(const i8_t *A, const i8_t *B_reo,
+                    i32_t *C, i8_t *A_reorder,
+                    const gemm_params_t *params);
+void i8gemm_k_zero4(const i8_t *A, const i8_t *B_reo,
+                    i32_t *C, i8_t *A_reorder,
+                    const gemm_params_t *params);
 void i8gemm_k_reo_ld (const i8_t *A, const i8_t *B_reo,
                       i32_t *C, i8_t *A_reorder,
                       const gemm_params_t *params);
@@ -120,6 +179,18 @@ void i8gemm_k_reo_ld2(const i8_t *A, const i8_t *B_reo,
 void i8gemm_k_reo_ld4(const i8_t *A, const i8_t *B_reo,
                       i32_t *C, i8_t *A_reorder,
                       const gemm_params_t *params);
+void i8gemm_k_reo_zero (const i8_t *A, const i8_t *B_reo,
+                        i32_t *C, i8_t *A_reorder,
+                        const gemm_params_t *params);
+void i8gemm_k_reo_zero1(const i8_t *A, const i8_t *B_reo,
+                        i32_t *C, i8_t *A_reorder,
+                        const gemm_params_t *params);
+void i8gemm_k_reo_zero2(const i8_t *A, const i8_t *B_reo,
+                        i32_t *C, i8_t *A_reorder,
+                        const gemm_params_t *params);
+void i8gemm_k_reo_zero4(const i8_t *A, const i8_t *B_reo,
+                        i32_t *C, i8_t *A_reorder,
+                        const gemm_params_t *params);
 
 void i8_pack_A_neon_m8_asm(const i8_t *A, i8_t *P, int K_r, int lda);
 void i8_pack_A_neon_m4_asm(const i8_t *A, i8_t *P, int K_r, int lda);
@@ -194,6 +265,11 @@ static int i8_neon_offline_a_reorder_mode(void) {
     return mode;
 }
 
+static int i8_accumulate_c_mode(void) {
+    const char *env = getenv("I8_GEMM_ACCUMULATE_C");
+    return env ? atoi(env) != 0 : 0;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // i8_pack_B — Pack B matrix for smmla kernel (caller allocates B_reo)
 //
@@ -222,9 +298,10 @@ void i8_pack_B(const i8_t *B, i8_t *B_reo, int K, int N) {
 // Handles arbitrary M by decomposing into full-8 + tail-4/2/1 calls.
 // ldc_global: C row stride in i32 elements (may differ from n for N-tiling).
 // ═══════════════════════════════════════════════════════════════════════
-static void i8_dispatch(const i8_t *A, const i8_t *B_reo,
-                         i32_t *C, int m, int k, int n,
-                         i8_t *A_reorder, int ldc_global) {
+static void i8_dispatch_core(const i8_t *A, const i8_t *B_reo,
+                             i32_t *C, int m, int k, int n,
+                             i8_t *A_reorder, int ldc_global,
+                             int zero_c) {
     volatile gemm_params_t p;
     p.lda = k;  p.ldb = k;  p.ldc = ldc_global;
     int processed = 0;
@@ -232,7 +309,12 @@ static void i8_dispatch(const i8_t *A, const i8_t *B_reo,
     int m_full = (m / 8) * 8;
     if (m_full > 0) {
         p.m = m_full;  p.k = k;  p.n = n;
-        i8gemm_k_ld(A, B_reo, C, A_reorder, (const gemm_params_t *)&p);
+        if (zero_c)
+            i8gemm_k_zero(A, B_reo, C, A_reorder,
+                          (const gemm_params_t *)&p);
+        else
+            i8gemm_k_ld(A, B_reo, C, A_reorder,
+                        (const gemm_params_t *)&p);
         processed = m_full;
     }
 
@@ -245,7 +327,12 @@ static void i8_dispatch(const i8_t *A, const i8_t *B_reo,
 
     if (m_rem >= 4) {
         p.m = 4;  p.k = k;  p.n = n;
-        i8gemm_k_ld4(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
+        if (zero_c)
+            i8gemm_k_zero4(At, B_reo, Ct, A_reo_t,
+                           (const gemm_params_t *)&p);
+        else
+            i8gemm_k_ld4(At, B_reo, Ct, A_reo_t,
+                         (const gemm_params_t *)&p);
         processed += 4; m_rem -= 4;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * ldc_global;
@@ -253,7 +340,12 @@ static void i8_dispatch(const i8_t *A, const i8_t *B_reo,
     }
     if (m_rem >= 2) {
         p.m = 2;  p.k = k;  p.n = n;
-        i8gemm_k_ld2(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
+        if (zero_c)
+            i8gemm_k_zero2(At, B_reo, Ct, A_reo_t,
+                           (const gemm_params_t *)&p);
+        else
+            i8gemm_k_ld2(At, B_reo, Ct, A_reo_t,
+                         (const gemm_params_t *)&p);
         processed += 2; m_rem -= 2;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * ldc_global;
@@ -261,13 +353,19 @@ static void i8_dispatch(const i8_t *A, const i8_t *B_reo,
     }
     if (m_rem >= 1) {
         p.m = 1;  p.k = k;  p.n = n;
-        i8gemm_k_ld1(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
+        if (zero_c)
+            i8gemm_k_zero1(At, B_reo, Ct, A_reo_t,
+                           (const gemm_params_t *)&p);
+        else
+            i8gemm_k_ld1(At, B_reo, Ct, A_reo_t,
+                         (const gemm_params_t *)&p);
     }
 }
 
-static void i8_dispatch_reo(const i8_t *A, const i8_t *B_reo,
-                            i32_t *C, int m, int k, int n,
-                            i8_t *A_reorder, int ldc_global) {
+static void i8_dispatch_reo_core(const i8_t *A, const i8_t *B_reo,
+                                 i32_t *C, int m, int k, int n,
+                                 i8_t *A_reorder, int ldc_global,
+                                 int zero_c) {
     volatile gemm_params_t p;
     p.lda = k;  p.ldb = k;  p.ldc = ldc_global;
     int processed = 0;
@@ -275,7 +373,12 @@ static void i8_dispatch_reo(const i8_t *A, const i8_t *B_reo,
     int m_full = (m / 8) * 8;
     if (m_full > 0) {
         p.m = m_full;  p.k = k;  p.n = n;
-        i8gemm_k_reo_ld(A, B_reo, C, A_reorder, (const gemm_params_t *)&p);
+        if (zero_c)
+            i8gemm_k_reo_zero(A, B_reo, C, A_reorder,
+                              (const gemm_params_t *)&p);
+        else
+            i8gemm_k_reo_ld(A, B_reo, C, A_reorder,
+                            (const gemm_params_t *)&p);
         processed = m_full;
     }
 
@@ -288,7 +391,12 @@ static void i8_dispatch_reo(const i8_t *A, const i8_t *B_reo,
 
     if (m_rem >= 4) {
         p.m = 4;  p.k = k;  p.n = n;
-        i8gemm_k_reo_ld4(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
+        if (zero_c)
+            i8gemm_k_reo_zero4(At, B_reo, Ct, A_reo_t,
+                               (const gemm_params_t *)&p);
+        else
+            i8gemm_k_reo_ld4(At, B_reo, Ct, A_reo_t,
+                             (const gemm_params_t *)&p);
         processed += 4; m_rem -= 4;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * ldc_global;
@@ -296,7 +404,12 @@ static void i8_dispatch_reo(const i8_t *A, const i8_t *B_reo,
     }
     if (m_rem >= 2) {
         p.m = 2;  p.k = k;  p.n = n;
-        i8gemm_k_reo_ld2(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
+        if (zero_c)
+            i8gemm_k_reo_zero2(At, B_reo, Ct, A_reo_t,
+                               (const gemm_params_t *)&p);
+        else
+            i8gemm_k_reo_ld2(At, B_reo, Ct, A_reo_t,
+                             (const gemm_params_t *)&p);
         processed += 2; m_rem -= 2;
         At = A + (uint64_t)processed * k;
         Ct = C + (uint64_t)processed * ldc_global;
@@ -304,7 +417,12 @@ static void i8_dispatch_reo(const i8_t *A, const i8_t *B_reo,
     }
     if (m_rem >= 1) {
         p.m = 1;  p.k = k;  p.n = n;
-        i8gemm_k_reo_ld1(At, B_reo, Ct, A_reo_t, (const gemm_params_t *)&p);
+        if (zero_c)
+            i8gemm_k_reo_zero1(At, B_reo, Ct, A_reo_t,
+                               (const gemm_params_t *)&p);
+        else
+            i8gemm_k_reo_ld1(At, B_reo, Ct, A_reo_t,
+                             (const gemm_params_t *)&p);
     }
 }
 
@@ -313,7 +431,8 @@ static void i8_dispatch_reo(const i8_t *A, const i8_t *B_reo,
 // ═══════════════════════════════════════════════════════════════════════
 static void tile_M_i8(const i8_t *A, const i8_t *B_reo,
                        i32_t *C, int M, int K_r, int N_r,
-                       i8_t *A_reo_pool, int num_threads, int prepacked_a) {
+                       i8_t *A_reo_pool, int num_threads, int prepacked_a,
+                       int zero_c) {
     int M8 = M / 8;
     int M_rem = M - M8 * 8;
     int blocks_per_thread = M8 / num_threads;
@@ -342,11 +461,12 @@ static void tile_M_i8(const i8_t *A, const i8_t *B_reo,
             i8_t *my_A_reo  = A_reo_pool + (uint64_t)my_m_start * K_r;
 
             if (prepacked_a)
-                i8_dispatch_reo(my_A, B_reo, my_C, my_m, K_r, N_r,
-                                my_A_reo, /*ldc_global=*/N_r);
+                i8_dispatch_reo_core(my_A, B_reo, my_C, my_m, K_r, N_r,
+                                     my_A_reo, /*ldc_global=*/N_r,
+                                     zero_c);
             else
-                i8_dispatch(my_A, B_reo, my_C, my_m, K_r, N_r,
-                            my_A_reo, /*ldc_global=*/N_r);
+                i8_dispatch_core(my_A, B_reo, my_C, my_m, K_r, N_r,
+                                 my_A_reo, /*ldc_global=*/N_r, zero_c);
         }
     }
 }
@@ -356,7 +476,8 @@ static void tile_M_i8(const i8_t *A, const i8_t *B_reo,
 // ═══════════════════════════════════════════════════════════════════════
 static void tile_N_i8(const i8_t *A, const i8_t *B_reo,
                        i32_t *C, int M, int K_r, int N_r,
-                       i8_t *A_reo_pool, int num_threads, int prepacked_a) {
+                       i8_t *A_reo_pool, int num_threads, int prepacked_a,
+                       int zero_c) {
     int N8 = N_r / 8;
     int blocks_per_thread = N8 / num_threads;
     int extra_blocks       = N8 % num_threads;
@@ -388,12 +509,53 @@ static void tile_N_i8(const i8_t *A, const i8_t *B_reo,
                 i32_t *my_C = C + my_n_start;
 
                 if (prepacked_a)
-                    i8_dispatch_reo(A, my_B, my_C, M, K_r, my_n,
-                                    my_A_reo, /*ldc_global=*/N_r);
+                    i8_dispatch_reo_core(A, my_B, my_C, M, K_r, my_n,
+                                         my_A_reo, /*ldc_global=*/N_r,
+                                         zero_c);
                 else
-                    i8_dispatch(A, my_B, my_C, M, K_r, my_n,
-                                my_A_reo, /*ldc_global=*/N_r);
+                    i8_dispatch_core(A, my_B, my_C, M, K_r, my_n,
+                                     my_A_reo, /*ldc_global=*/N_r, zero_c);
             }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// tile_2D_i8 — ACL-style 2D split across M blocks and N panels.
+// Requires prepacked A so every M/N task can reuse the same A panel.
+// ═══════════════════════════════════════════════════════════════════════
+static void tile_2D_i8(const i8_t *A, const i8_t *B_reo,
+                       i32_t *C, int M, int K_r, int N_r,
+                       i8_t *A_reo_pool, int num_threads,
+                       int m_threads, int n_threads, int zero_c) {
+    int M8 = M / 8;
+    int M_rem = M - M8 * 8;
+    int N8 = N_r / 8;
+
+    #pragma omp parallel for collapse(2) num_threads(num_threads) schedule(static)
+    for (int ni = 0; ni < n_threads; ni++) {
+        for (int mi = 0; mi < m_threads; mi++) {
+            int m_block_start = (M8 * mi) / m_threads;
+            int m_block_end = (M8 * (mi + 1)) / m_threads;
+            int n_block_start = (N8 * ni) / n_threads;
+            int n_block_end = (N8 * (ni + 1)) / n_threads;
+
+            int my_m = (m_block_end - m_block_start) * 8;
+            if (mi == m_threads - 1)
+                my_m += M_rem;
+            int my_n = (n_block_end - n_block_start) * 8;
+            if (my_m <= 0 || my_n <= 0)
+                continue;
+
+            int m_start = m_block_start * 8;
+            int n_start = n_block_start * 8;
+            const i8_t *my_A = A + (uint64_t)m_start * K_r;
+            const i8_t *my_B = B_reo + (uint64_t)n_block_start * K_r * 8;
+            i32_t *my_C = C + (uint64_t)m_start * N_r + n_start;
+            i8_t *my_A_reo = A_reo_pool + (uint64_t)m_start * K_r;
+
+            i8_dispatch_reo_core(my_A, my_B, my_C, my_m, K_r, my_n,
+                                 my_A_reo, /*ldc_global=*/N_r, zero_c);
         }
     }
 }
@@ -415,10 +577,26 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
     const int n_tiles = N_r / 8;
     num_threads = i8_effective_threads(num_threads, M, n_tiles);
     const int use_n_split = i8_use_n_split(M, K_r, N_r, n_tiles, num_threads);
+    const int use_2d_split = i8_requested_2d_split() &&
+        num_threads > 1 && M >= 16 && N_r >= 16;
     const int offline_mode = i8_neon_offline_a_reorder_mode();
-    const int prepack_a = offline_mode > 1 || (offline_mode == 1 && use_n_split);
+    const int prepack_a = use_2d_split || offline_mode > 1 ||
+        (offline_mode == 1 && use_n_split);
+    const int zero_c = !i8_accumulate_c_mode();
 
-    if (!use_n_split) {
+    if (use_2d_split) {
+        int m_threads = 1;
+        int n_threads = num_threads;
+        i8_split_2d_threads(num_threads, (M + 7) / 8, n_tiles,
+                            &m_threads, &n_threads);
+        i8_t *A_reo_pool = (i8_t *)aligned_alloc_64(
+            i8_neon_a_reorder_bytes(M, K_r));
+        if (!A_reo_pool) return;
+        i8_pack_A_neon(A, A_reo_pool, M, K_r, K_r, num_threads);
+        tile_2D_i8(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads,
+                   m_threads, n_threads, zero_c);
+        free(A_reo_pool);
+    } else if (!use_n_split) {
         // M-tiling: one shared A_reorder pool, partitioned by M rows.
         // ld1 tail kernel writes zero-padded q-regs (2× expansion per row);
         // use 2× allocation to avoid overflow for non-multiple-of-8 M.
@@ -428,7 +606,7 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
         if (prepack_a)
             i8_pack_A_neon(A, A_reo_pool, M, K_r, K_r, num_threads);
         tile_M_i8(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads,
-                  prepack_a);
+                  prepack_a, zero_c);
         free(A_reo_pool);
     } else {
         size_t copies = prepack_a ? 1u : (size_t)num_threads;
@@ -438,7 +616,7 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
         if (prepack_a)
             i8_pack_A_neon(A, A_reo_pool, M, K_r, K_r, num_threads);
         tile_N_i8(A, B_reo, C, M, K_r, N_r, A_reo_pool, num_threads,
-                  prepack_a);
+                  prepack_a, zero_c);
         free(A_reo_pool);
     }
 }

@@ -1,0 +1,145 @@
+lib,impl,dtype,cache,M,K,N,threads,KiB,reps,perf,status,note
+i8gemm,i8gemm_sve,bf16,L1,16,128,128,1,44.0,50,131.28,ok,
+i8gemm,i8gemm_sve,i8,L1,16,128,128,1,26.0,50,144.34,ok,
+i8gemm,i8gemm_neon,bf16,L1,16,128,128,1,44.0,50,154.61,ok,
+i8gemm,i8gemm_neon,i8,L1,16,128,128,1,26.0,50,282.54,ok,
+i8gemm,i8gemm_neon_m16n4,i8,L1,16,128,128,1,26.0,50,176.17,ok,
+acl,acl_auto,bf16,L1,16,128,128,1,44.0,50,217.981,ok,selected=sve_hybrid_bf16fp32_mmla_6x4VL; compatible=sve_interleaved_bf16fp32_mmla_8x3VL|sve_hybrid_bf16fp32_mmla_6x4VL|sve_hybrid_bf16fp32_dot_6x4VL|sve_interleaved_bf16fp32_dot_8x3VL|a64_hybrid_bf16fp32_mmla_6x16|a64_interleaved_bf16fp32_mmla_8x12|a64_hybrid_bf16fp32_dot_6x16|a64_interleaved_bf16fp32_dot_8x12|a64_sgemm_8x12
+acl,acl_auto,i8,L1,16,128,128,1,26.0,50,372.094,ok,selected=sve_hybrid_s8s32_mmla_6x4VL; compatible=sve_hybrid_s8s32_mmla_6x4VL|sve_interleaved_s8s32_mmla_8x3VL|sve_hybrid_s8s32_dot_6x4VL|sve_interleaved_s8s32_dot_8x3VL|a64_interleaved_s8s32_mmla_8x12|a64_hybrid_s8s32_mmla_6x16|a64_gemm_s16_8x12|a64_hybrid_s8s32_dot_6x16|a64_gemm_s8_8x12|a64_gemm_s8_4x4
+kleidiai,kleidiai_bf16_neon_mmla,bf16,L1,16,128,128,1,45.5,50,176.384,ok,fixed=kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla; instr=bfmmla; omp=m_blocks
+kleidiai,kleidiai_i8_neon_i8mm,i8,L1,16,128,128,1,27.6,50,168.409,ok,fixed=kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm; instr=smmla; output=f32_dequant; omp=m_blocks
+i8gemm,i8gemm_sve,bf16,L1,16,128,128,2,44.0,50,116.27,ok,
+i8gemm,i8gemm_sve,i8,L1,16,128,128,2,26.0,50,118.34,ok,
+i8gemm,i8gemm_neon,bf16,L1,16,128,128,2,44.0,50,205.49,ok,
+i8gemm,i8gemm_neon,i8,L1,16,128,128,2,26.0,50,275.61,ok,
+i8gemm,i8gemm_neon_m16n4,i8,L1,16,128,128,2,26.0,50,163.03,ok,
+acl,acl_auto,bf16,L1,16,128,128,2,44.0,50,164.344,ok,selected=sve_hybrid_bf16fp32_mmla_6x4VL; compatible=sve_interleaved_bf16fp32_mmla_8x3VL|sve_hybrid_bf16fp32_mmla_6x4VL|sve_hybrid_bf16fp32_dot_6x4VL|sve_interleaved_bf16fp32_dot_8x3VL|a64_hybrid_bf16fp32_mmla_6x16|a64_interleaved_bf16fp32_mmla_8x12|a64_hybrid_bf16fp32_dot_6x16|a64_interleaved_bf16fp32_dot_8x12|a64_sgemm_8x12
+acl,acl_auto,i8,L1,16,128,128,2,26.0,50,225.611,ok,selected=sve_hybrid_s8s32_mmla_6x4VL; compatible=sve_hybrid_s8s32_mmla_6x4VL|sve_interleaved_s8s32_mmla_8x3VL|sve_hybrid_s8s32_dot_6x4VL|sve_interleaved_s8s32_dot_8x3VL|a64_interleaved_s8s32_mmla_8x12|a64_hybrid_s8s32_mmla_6x16|a64_gemm_s16_8x12|a64_hybrid_s8s32_dot_6x16|a64_gemm_s8_8x12|a64_gemm_s8_4x4
+kleidiai,kleidiai_bf16_neon_mmla,bf16,L1,16,128,128,2,45.5,50,207.433,ok,fixed=kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla; instr=bfmmla; omp=m_blocks
+kleidiai,kleidiai_i8_neon_i8mm,i8,L1,16,128,128,2,27.6,50,146.638,ok,fixed=kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm; instr=smmla; output=f32_dequant; omp=m_blocks
+i8gemm,i8gemm_sve,bf16,L1,16,128,128,4,44.0,50,141.02,ok,
+i8gemm,i8gemm_sve,i8,L1,16,128,128,4,26.0,50,117.74,ok,
+i8gemm,i8gemm_neon,bf16,L1,16,128,128,4,44.0,50,261.70,ok,
+i8gemm,i8gemm_neon,i8,L1,16,128,128,4,26.0,50,210.08,ok,
+i8gemm,i8gemm_neon_m16n4,i8,L1,16,128,128,4,26.0,50,177.64,ok,
+acl,acl_auto,bf16,L1,16,128,128,4,44.0,50,188.243,ok,selected=sve_hybrid_bf16fp32_mmla_6x4VL; compatible=sve_interleaved_bf16fp32_mmla_8x3VL|sve_hybrid_bf16fp32_mmla_6x4VL|sve_hybrid_bf16fp32_dot_6x4VL|sve_interleaved_bf16fp32_dot_8x3VL|a64_hybrid_bf16fp32_mmla_6x16|a64_interleaved_bf16fp32_mmla_8x12|a64_hybrid_bf16fp32_dot_6x16|a64_interleaved_bf16fp32_dot_8x12|a64_sgemm_8x12
+acl,acl_auto,i8,L1,16,128,128,4,26.0,50,245.343,ok,selected=sve_hybrid_s8s32_mmla_6x4VL; compatible=sve_hybrid_s8s32_mmla_6x4VL|sve_interleaved_s8s32_mmla_8x3VL|sve_hybrid_s8s32_dot_6x4VL|sve_interleaved_s8s32_dot_8x3VL|a64_interleaved_s8s32_mmla_8x12|a64_hybrid_s8s32_mmla_6x16|a64_gemm_s16_8x12|a64_hybrid_s8s32_dot_6x16|a64_gemm_s8_8x12|a64_gemm_s8_4x4
+kleidiai,kleidiai_bf16_neon_mmla,bf16,L1,16,128,128,4,45.5,50,200.952,ok,fixed=kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla; instr=bfmmla; omp=m_blocks
+kleidiai,kleidiai_i8_neon_i8mm,i8,L1,16,128,128,4,27.6,50,142.418,ok,fixed=kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm; instr=smmla; output=f32_dequant; omp=m_blocks
+i8gemm,i8gemm_sve,bf16,L1,16,128,128,8,44.0,50,143.44,ok,
+i8gemm,i8gemm_sve,i8,L1,16,128,128,8,26.0,50,121.09,ok,
+i8gemm,i8gemm_neon,bf16,L1,16,128,128,8,44.0,50,264.72,ok,
+i8gemm,i8gemm_neon,i8,L1,16,128,128,8,26.0,50,209.05,ok,
+i8gemm,i8gemm_neon_m16n4,i8,L1,16,128,128,8,26.0,50,166.22,ok,
+acl,acl_auto,bf16,L1,16,128,128,8,44.0,50,211.456,ok,selected=sve_hybrid_bf16fp32_mmla_6x4VL; compatible=sve_interleaved_bf16fp32_mmla_8x3VL|sve_hybrid_bf16fp32_mmla_6x4VL|sve_hybrid_bf16fp32_dot_6x4VL|sve_interleaved_bf16fp32_dot_8x3VL|a64_hybrid_bf16fp32_mmla_6x16|a64_interleaved_bf16fp32_mmla_8x12|a64_hybrid_bf16fp32_dot_6x16|a64_interleaved_bf16fp32_dot_8x12|a64_sgemm_8x12
+acl,acl_auto,i8,L1,16,128,128,8,26.0,50,247.061,ok,selected=sve_hybrid_s8s32_mmla_6x4VL; compatible=sve_hybrid_s8s32_mmla_6x4VL|sve_interleaved_s8s32_mmla_8x3VL|sve_hybrid_s8s32_dot_6x4VL|sve_interleaved_s8s32_dot_8x3VL|a64_interleaved_s8s32_mmla_8x12|a64_hybrid_s8s32_mmla_6x16|a64_gemm_s16_8x12|a64_hybrid_s8s32_dot_6x16|a64_gemm_s8_8x12|a64_gemm_s8_4x4
+kleidiai,kleidiai_bf16_neon_mmla,bf16,L1,16,128,128,8,45.5,50,189.562,ok,fixed=kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla; instr=bfmmla; omp=m_blocks
+kleidiai,kleidiai_i8_neon_i8mm,i8,L1,16,128,128,8,27.6,50,137.528,ok,fixed=kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm; instr=smmla; output=f32_dequant; omp=m_blocks
+i8gemm,i8gemm_sve,bf16,L2,64,512,512,1,704.0,20,252.01,ok,
+i8gemm,i8gemm_sve,i8,H2,64,512,512,1,416.0,20,474.74,ok,
+i8gemm,i8gemm_neon,bf16,L2,64,512,512,1,704.0,20,169.89,ok,
+i8gemm,i8gemm_neon,i8,H2,64,512,512,1,416.0,20,471.69,ok,
+i8gemm,i8gemm_neon_m16n4,i8,H2,64,512,512,1,416.0,20,310.52,ok,
+acl,acl_auto,bf16,L2,64,512,512,1,704.0,20,239.968,ok,selected=a64_interleaved_bf16fp32_mmla_8x12; compatible=sve_interleaved_bf16fp32_mmla_8x3VL|sve_hybrid_bf16fp32_mmla_6x4VL|sve_hybrid_bf16fp32_dot_6x4VL|sve_interleaved_bf16fp32_dot_8x3VL|a64_hybrid_bf16fp32_mmla_6x16|a64_interleaved_bf16fp32_mmla_8x12|a64_hybrid_bf16fp32_dot_6x16|a64_interleaved_bf16fp32_dot_8x12|a64_sgemm_8x12
+acl,acl_auto,i8,H2,64,512,512,1,416.0,20,508.567,ok,selected=sve_interleaved_s8s32_mmla_8x3VL; compatible=sve_hybrid_s8s32_mmla_6x4VL|sve_interleaved_s8s32_mmla_8x3VL|sve_hybrid_s8s32_dot_6x4VL|sve_interleaved_s8s32_dot_8x3VL|a64_interleaved_s8s32_mmla_8x12|a64_hybrid_s8s32_mmla_6x16|a64_gemm_s16_8x12|a64_hybrid_s8s32_dot_6x16|a64_gemm_s8_8x12|a64_gemm_s8_4x4
+kleidiai,kleidiai_bf16_neon_mmla,bf16,L2,64,512,512,1,710.0,20,238.243,ok,fixed=kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla; instr=bfmmla; omp=m_blocks
+kleidiai,kleidiai_i8_neon_i8mm,i8,H2,64,512,512,1,422.5,20,358.770,ok,fixed=kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm; instr=smmla; output=f32_dequant; omp=m_blocks
+i8gemm,i8gemm_sve,bf16,L2,64,512,512,2,704.0,20,411.19,ok,
+i8gemm,i8gemm_sve,i8,H2,64,512,512,2,416.0,20,735.94,ok,
+i8gemm,i8gemm_neon,bf16,L2,64,512,512,2,704.0,20,339.01,ok,
+i8gemm,i8gemm_neon,i8,H2,64,512,512,2,416.0,20,766.04,ok,
+i8gemm,i8gemm_neon_m16n4,i8,H2,64,512,512,2,416.0,20,601.66,ok,
+acl,acl_auto,bf16,L2,64,512,512,2,704.0,20,371.966,ok,selected=a64_interleaved_bf16fp32_mmla_8x12; compatible=sve_interleaved_bf16fp32_mmla_8x3VL|sve_hybrid_bf16fp32_mmla_6x4VL|sve_hybrid_bf16fp32_dot_6x4VL|sve_interleaved_bf16fp32_dot_8x3VL|a64_hybrid_bf16fp32_mmla_6x16|a64_interleaved_bf16fp32_mmla_8x12|a64_hybrid_bf16fp32_dot_6x16|a64_interleaved_bf16fp32_dot_8x12|a64_sgemm_8x12
+acl,acl_auto,i8,H2,64,512,512,2,416.0,20,833.346,ok,selected=sve_interleaved_s8s32_mmla_8x3VL; compatible=sve_hybrid_s8s32_mmla_6x4VL|sve_interleaved_s8s32_mmla_8x3VL|sve_hybrid_s8s32_dot_6x4VL|sve_interleaved_s8s32_dot_8x3VL|a64_interleaved_s8s32_mmla_8x12|a64_hybrid_s8s32_mmla_6x16|a64_gemm_s16_8x12|a64_hybrid_s8s32_dot_6x16|a64_gemm_s8_8x12|a64_gemm_s8_4x4
+kleidiai,kleidiai_bf16_neon_mmla,bf16,L2,64,512,512,2,710.0,20,382.123,ok,fixed=kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla; instr=bfmmla; omp=m_blocks
+kleidiai,kleidiai_i8_neon_i8mm,i8,H2,64,512,512,2,422.5,20,523.127,ok,fixed=kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm; instr=smmla; output=f32_dequant; omp=m_blocks
+i8gemm,i8gemm_sve,bf16,L2,64,512,512,4,704.0,20,709.48,ok,
+i8gemm,i8gemm_sve,i8,H2,64,512,512,4,416.0,20,1229.14,ok,
+i8gemm,i8gemm_neon,bf16,L2,64,512,512,4,704.0,20,589.83,ok,
+i8gemm,i8gemm_neon,i8,H2,64,512,512,4,416.0,20,1342.45,ok,
+i8gemm,i8gemm_neon_m16n4,i8,H2,64,512,512,4,416.0,20,1069.74,ok,
+acl,acl_auto,bf16,L2,64,512,512,4,704.0,20,654.295,ok,selected=a64_interleaved_bf16fp32_mmla_8x12; compatible=sve_interleaved_bf16fp32_mmla_8x3VL|sve_hybrid_bf16fp32_mmla_6x4VL|sve_hybrid_bf16fp32_dot_6x4VL|sve_interleaved_bf16fp32_dot_8x3VL|a64_hybrid_bf16fp32_mmla_6x16|a64_interleaved_bf16fp32_mmla_8x12|a64_hybrid_bf16fp32_dot_6x16|a64_interleaved_bf16fp32_dot_8x12|a64_sgemm_8x12
+acl,acl_auto,i8,H2,64,512,512,4,416.0,20,1390.189,ok,selected=sve_interleaved_s8s32_mmla_8x3VL; compatible=sve_hybrid_s8s32_mmla_6x4VL|sve_interleaved_s8s32_mmla_8x3VL|sve_hybrid_s8s32_dot_6x4VL|sve_interleaved_s8s32_dot_8x3VL|a64_interleaved_s8s32_mmla_8x12|a64_hybrid_s8s32_mmla_6x16|a64_gemm_s16_8x12|a64_hybrid_s8s32_dot_6x16|a64_gemm_s8_8x12|a64_gemm_s8_4x4
+kleidiai,kleidiai_bf16_neon_mmla,bf16,L2,64,512,512,4,710.0,20,632.270,ok,fixed=kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla; instr=bfmmla; omp=m_blocks
+kleidiai,kleidiai_i8_neon_i8mm,i8,H2,64,512,512,4,422.5,20,784.625,ok,fixed=kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm; instr=smmla; output=f32_dequant; omp=m_blocks
+i8gemm,i8gemm_sve,bf16,L2,64,512,512,8,704.0,20,1161.40,ok,
+i8gemm,i8gemm_sve,i8,H2,64,512,512,8,416.0,20,1926.35,ok,
+i8gemm,i8gemm_neon,bf16,L2,64,512,512,8,704.0,20,1032.07,ok,
+i8gemm,i8gemm_neon,i8,H2,64,512,512,8,416.0,20,2251.07,ok,
+i8gemm,i8gemm_neon_m16n4,i8,H2,64,512,512,8,416.0,20,1811.72,ok,
+acl,acl_auto,bf16,L2,64,512,512,8,704.0,20,1234.206,ok,selected=sve_hybrid_bf16fp32_mmla_6x4VL; compatible=sve_interleaved_bf16fp32_mmla_8x3VL|sve_hybrid_bf16fp32_mmla_6x4VL|sve_hybrid_bf16fp32_dot_6x4VL|sve_interleaved_bf16fp32_dot_8x3VL|a64_hybrid_bf16fp32_mmla_6x16|a64_interleaved_bf16fp32_mmla_8x12|a64_hybrid_bf16fp32_dot_6x16|a64_interleaved_bf16fp32_dot_8x12|a64_sgemm_8x12
+acl,acl_auto,i8,H2,64,512,512,8,416.0,20,2300.116,ok,selected=sve_hybrid_s8s32_mmla_6x4VL; compatible=sve_hybrid_s8s32_mmla_6x4VL|sve_interleaved_s8s32_mmla_8x3VL|sve_hybrid_s8s32_dot_6x4VL|sve_interleaved_s8s32_dot_8x3VL|a64_interleaved_s8s32_mmla_8x12|a64_hybrid_s8s32_mmla_6x16|a64_gemm_s16_8x12|a64_hybrid_s8s32_dot_6x16|a64_gemm_s8_8x12|a64_gemm_s8_4x4
+kleidiai,kleidiai_bf16_neon_mmla,bf16,L2,64,512,512,8,710.0,20,1050.025,ok,fixed=kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla; instr=bfmmla; omp=m_blocks
+kleidiai,kleidiai_i8_neon_i8mm,i8,H2,64,512,512,8,422.5,20,765.011,ok,fixed=kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm; instr=smmla; output=f32_dequant; omp=m_blocks
+i8gemm,i8gemm_sve,bf16,GT_L2,512,1024,1024,1,5120.0,8,282.28,ok,
+i8gemm,i8gemm_sve,i8,GT_L2,512,1024,1024,1,3584.0,8,531.24,ok,
+i8gemm,i8gemm_neon,bf16,GT_L2,512,1024,1024,1,5120.0,8,164.92,ok,
+i8gemm,i8gemm_neon,i8,GT_L2,512,1024,1024,1,3584.0,8,369.65,ok,
+i8gemm,i8gemm_neon_m16n4,i8,GT_L2,512,1024,1024,1,3584.0,8,316.81,ok,
+acl,acl_auto,bf16,GT_L2,512,1024,1024,1,5120.0,8,251.681,ok,selected=sve_interleaved_bf16fp32_mmla_8x3VL; compatible=sve_interleaved_bf16fp32_mmla_8x3VL|sve_hybrid_bf16fp32_mmla_6x4VL|sve_hybrid_bf16fp32_dot_6x4VL|sve_interleaved_bf16fp32_dot_8x3VL|a64_hybrid_bf16fp32_mmla_6x16|a64_interleaved_bf16fp32_mmla_8x12|a64_hybrid_bf16fp32_dot_6x16|a64_interleaved_bf16fp32_dot_8x12|a64_sgemm_8x12
+acl,acl_auto,i8,GT_L2,512,1024,1024,1,3584.0,8,512.391,ok,selected=sve_interleaved_s8s32_mmla_8x3VL; compatible=sve_hybrid_s8s32_mmla_6x4VL|sve_interleaved_s8s32_mmla_8x3VL|sve_hybrid_s8s32_dot_6x4VL|sve_interleaved_s8s32_dot_8x3VL|a64_interleaved_s8s32_mmla_8x12|a64_hybrid_s8s32_mmla_6x16|a64_gemm_s16_8x12|a64_hybrid_s8s32_dot_6x16|a64_gemm_s8_8x12|a64_gemm_s8_4x4
+kleidiai,kleidiai_bf16_neon_mmla,bf16,GT_L2,512,1024,1024,1,5140.0,8,233.381,ok,fixed=kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla; instr=bfmmla; omp=m_blocks
+kleidiai,kleidiai_i8_neon_i8mm,i8,GT_L2,512,1024,1024,1,3600.0,8,405.980,ok,fixed=kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm; instr=smmla; output=f32_dequant; omp=m_blocks
+i8gemm,i8gemm_sve,bf16,GT_L2,512,1024,1024,2,5120.0,8,466.48,ok,
+i8gemm,i8gemm_sve,i8,GT_L2,512,1024,1024,2,3584.0,8,887.39,ok,
+i8gemm,i8gemm_neon,bf16,GT_L2,512,1024,1024,2,5120.0,8,329.28,ok,
+i8gemm,i8gemm_neon,i8,GT_L2,512,1024,1024,2,3584.0,8,729.48,ok,
+i8gemm,i8gemm_neon_m16n4,i8,GT_L2,512,1024,1024,2,3584.0,8,610.52,ok,
+acl,acl_auto,bf16,GT_L2,512,1024,1024,2,5120.0,8,414.214,ok,selected=sve_interleaved_bf16fp32_mmla_8x3VL; compatible=sve_interleaved_bf16fp32_mmla_8x3VL|sve_hybrid_bf16fp32_mmla_6x4VL|sve_hybrid_bf16fp32_dot_6x4VL|sve_interleaved_bf16fp32_dot_8x3VL|a64_hybrid_bf16fp32_mmla_6x16|a64_interleaved_bf16fp32_mmla_8x12|a64_hybrid_bf16fp32_dot_6x16|a64_interleaved_bf16fp32_dot_8x12|a64_sgemm_8x12
+acl,acl_auto,i8,GT_L2,512,1024,1024,2,3584.0,8,844.711,ok,selected=sve_interleaved_s8s32_mmla_8x3VL; compatible=sve_hybrid_s8s32_mmla_6x4VL|sve_interleaved_s8s32_mmla_8x3VL|sve_hybrid_s8s32_dot_6x4VL|sve_interleaved_s8s32_dot_8x3VL|a64_interleaved_s8s32_mmla_8x12|a64_hybrid_s8s32_mmla_6x16|a64_gemm_s16_8x12|a64_hybrid_s8s32_dot_6x16|a64_gemm_s8_8x12|a64_gemm_s8_4x4
+kleidiai,kleidiai_bf16_neon_mmla,bf16,GT_L2,512,1024,1024,2,5140.0,8,306.160,ok,fixed=kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla; instr=bfmmla; omp=m_blocks
+kleidiai,kleidiai_i8_neon_i8mm,i8,GT_L2,512,1024,1024,2,3600.0,8,607.372,ok,fixed=kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm; instr=smmla; output=f32_dequant; omp=m_blocks
+i8gemm,i8gemm_sve,bf16,GT_L2,512,1024,1024,4,5120.0,8,831.52,ok,
+i8gemm,i8gemm_sve,i8,GT_L2,512,1024,1024,4,3584.0,8,1603.40,ok,
+i8gemm,i8gemm_neon,bf16,GT_L2,512,1024,1024,4,5120.0,8,586.88,ok,
+i8gemm,i8gemm_neon,i8,GT_L2,512,1024,1024,4,3584.0,8,1350.12,ok,
+i8gemm,i8gemm_neon_m16n4,i8,GT_L2,512,1024,1024,4,3584.0,8,1128.09,ok,
+acl,acl_auto,bf16,GT_L2,512,1024,1024,4,5120.0,8,741.129,ok,selected=sve_interleaved_bf16fp32_mmla_8x3VL; compatible=sve_interleaved_bf16fp32_mmla_8x3VL|sve_hybrid_bf16fp32_mmla_6x4VL|sve_hybrid_bf16fp32_dot_6x4VL|sve_interleaved_bf16fp32_dot_8x3VL|a64_hybrid_bf16fp32_mmla_6x16|a64_interleaved_bf16fp32_mmla_8x12|a64_hybrid_bf16fp32_dot_6x16|a64_interleaved_bf16fp32_dot_8x12|a64_sgemm_8x12
+acl,acl_auto,i8,GT_L2,512,1024,1024,4,3584.0,8,1503.459,ok,selected=sve_interleaved_s8s32_mmla_8x3VL; compatible=sve_hybrid_s8s32_mmla_6x4VL|sve_interleaved_s8s32_mmla_8x3VL|sve_hybrid_s8s32_dot_6x4VL|sve_interleaved_s8s32_dot_8x3VL|a64_interleaved_s8s32_mmla_8x12|a64_hybrid_s8s32_mmla_6x16|a64_gemm_s16_8x12|a64_hybrid_s8s32_dot_6x16|a64_gemm_s8_8x12|a64_gemm_s8_4x4
+kleidiai,kleidiai_bf16_neon_mmla,bf16,GT_L2,512,1024,1024,4,5140.0,8,589.503,ok,fixed=kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla; instr=bfmmla; omp=m_blocks
+kleidiai,kleidiai_i8_neon_i8mm,i8,GT_L2,512,1024,1024,4,3600.0,8,1010.728,ok,fixed=kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm; instr=smmla; output=f32_dequant; omp=m_blocks
+i8gemm,i8gemm_sve,bf16,GT_L2,512,1024,1024,8,5120.0,8,1488.85,ok,
+i8gemm,i8gemm_sve,i8,GT_L2,512,1024,1024,8,3584.0,8,2891.61,ok,
+i8gemm,i8gemm_neon,bf16,GT_L2,512,1024,1024,8,5120.0,8,1054.24,ok,
+i8gemm,i8gemm_neon,i8,GT_L2,512,1024,1024,8,3584.0,8,2433.73,ok,
+i8gemm,i8gemm_neon_m16n4,i8,GT_L2,512,1024,1024,8,3584.0,8,2151.95,ok,
+acl,acl_auto,bf16,GT_L2,512,1024,1024,8,5120.0,8,974.496,ok,selected=sve_interleaved_bf16fp32_mmla_8x3VL; compatible=sve_interleaved_bf16fp32_mmla_8x3VL|sve_hybrid_bf16fp32_mmla_6x4VL|sve_hybrid_bf16fp32_dot_6x4VL|sve_interleaved_bf16fp32_dot_8x3VL|a64_hybrid_bf16fp32_mmla_6x16|a64_interleaved_bf16fp32_mmla_8x12|a64_hybrid_bf16fp32_dot_6x16|a64_interleaved_bf16fp32_dot_8x12|a64_sgemm_8x12
+acl,acl_auto,i8,GT_L2,512,1024,1024,8,3584.0,8,2714.907,ok,selected=sve_interleaved_s8s32_mmla_8x3VL; compatible=sve_hybrid_s8s32_mmla_6x4VL|sve_interleaved_s8s32_mmla_8x3VL|sve_hybrid_s8s32_dot_6x4VL|sve_interleaved_s8s32_dot_8x3VL|a64_interleaved_s8s32_mmla_8x12|a64_hybrid_s8s32_mmla_6x16|a64_gemm_s16_8x12|a64_hybrid_s8s32_dot_6x16|a64_gemm_s8_8x12|a64_gemm_s8_4x4
+kleidiai,kleidiai_bf16_neon_mmla,bf16,GT_L2,512,1024,1024,8,5140.0,8,1083.060,ok,fixed=kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla; instr=bfmmla; omp=m_blocks
+kleidiai,kleidiai_i8_neon_i8mm,i8,GT_L2,512,1024,1024,8,3600.0,8,1463.832,ok,fixed=kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm; instr=smmla; output=f32_dequant; omp=m_blocks
+i8gemm,i8gemm_sve,bf16,GT_L2,2048,4096,8192,1,147456.0,3,277.88,ok,
+i8gemm,i8gemm_sve,i8,GT_L2,2048,4096,8192,1,106496.0,3,554.54,ok,
+i8gemm,i8gemm_neon,bf16,GT_L2,2048,4096,8192,1,147456.0,3,143.68,ok,
+i8gemm,i8gemm_neon,i8,GT_L2,2048,4096,8192,1,106496.0,3,290.58,ok,
+i8gemm,i8gemm_neon_m16n4,i8,GT_L2,2048,4096,8192,1,106496.0,3,228.50,ok,
+acl,acl_auto,bf16,GT_L2,2048,4096,8192,1,147456.0,3,248.414,ok,selected=sve_interleaved_bf16fp32_mmla_8x3VL; compatible=sve_interleaved_bf16fp32_mmla_8x3VL|sve_hybrid_bf16fp32_mmla_6x4VL|sve_hybrid_bf16fp32_dot_6x4VL|sve_interleaved_bf16fp32_dot_8x3VL|a64_hybrid_bf16fp32_mmla_6x16|a64_interleaved_bf16fp32_mmla_8x12|a64_hybrid_bf16fp32_dot_6x16|a64_interleaved_bf16fp32_dot_8x12|a64_sgemm_8x12
+acl,acl_auto,i8,GT_L2,2048,4096,8192,1,106496.0,3,495.044,ok,selected=sve_interleaved_s8s32_mmla_8x3VL; compatible=sve_hybrid_s8s32_mmla_6x4VL|sve_interleaved_s8s32_mmla_8x3VL|sve_hybrid_s8s32_dot_6x4VL|sve_interleaved_s8s32_dot_8x3VL|a64_interleaved_s8s32_mmla_8x12|a64_hybrid_s8s32_mmla_6x16|a64_gemm_s16_8x12|a64_hybrid_s8s32_dot_6x16|a64_gemm_s8_8x12|a64_gemm_s8_4x4
+kleidiai,kleidiai_bf16_neon_mmla,bf16,GT_L2,2048,4096,8192,1,147520.0,3,180.476,ok,fixed=kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla; instr=bfmmla; omp=m_blocks
+kleidiai,kleidiai_i8_neon_i8mm,i8,GT_L2,2048,4096,8192,1,106608.0,3,302.825,ok,fixed=kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm; instr=smmla; output=f32_dequant; omp=m_blocks
+i8gemm,i8gemm_sve,bf16,GT_L2,2048,4096,8192,2,147456.0,3,445.02,ok,
+i8gemm,i8gemm_sve,i8,GT_L2,2048,4096,8192,2,106496.0,3,743.82,ok,
+i8gemm,i8gemm_neon,bf16,GT_L2,2048,4096,8192,2,147456.0,3,280.53,ok,
+i8gemm,i8gemm_neon,i8,GT_L2,2048,4096,8192,2,106496.0,3,584.93,ok,
+i8gemm,i8gemm_neon_m16n4,i8,GT_L2,2048,4096,8192,2,106496.0,3,455.69,ok,
+acl,acl_auto,bf16,GT_L2,2048,4096,8192,2,147456.0,3,417.515,ok,selected=sve_interleaved_bf16fp32_mmla_8x3VL; compatible=sve_interleaved_bf16fp32_mmla_8x3VL|sve_hybrid_bf16fp32_mmla_6x4VL|sve_hybrid_bf16fp32_dot_6x4VL|sve_interleaved_bf16fp32_dot_8x3VL|a64_hybrid_bf16fp32_mmla_6x16|a64_interleaved_bf16fp32_mmla_8x12|a64_hybrid_bf16fp32_dot_6x16|a64_interleaved_bf16fp32_dot_8x12|a64_sgemm_8x12
+acl,acl_auto,i8,GT_L2,2048,4096,8192,2,106496.0,3,834.707,ok,selected=sve_interleaved_s8s32_mmla_8x3VL; compatible=sve_hybrid_s8s32_mmla_6x4VL|sve_interleaved_s8s32_mmla_8x3VL|sve_hybrid_s8s32_dot_6x4VL|sve_interleaved_s8s32_dot_8x3VL|a64_interleaved_s8s32_mmla_8x12|a64_hybrid_s8s32_mmla_6x16|a64_gemm_s16_8x12|a64_hybrid_s8s32_dot_6x16|a64_gemm_s8_8x12|a64_gemm_s8_4x4
+kleidiai,kleidiai_bf16_neon_mmla,bf16,GT_L2,2048,4096,8192,2,147520.0,3,293.112,ok,fixed=kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla; instr=bfmmla; omp=m_blocks
+kleidiai,kleidiai_i8_neon_i8mm,i8,GT_L2,2048,4096,8192,2,106608.0,3,525.714,ok,fixed=kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm; instr=smmla; output=f32_dequant; omp=m_blocks
+i8gemm,i8gemm_sve,bf16,GT_L2,2048,4096,8192,4,147456.0,3,806.74,ok,
+i8gemm,i8gemm_sve,i8,GT_L2,2048,4096,8192,4,106496.0,3,1446.76,ok,
+i8gemm,i8gemm_neon,bf16,GT_L2,2048,4096,8192,4,147456.0,3,482.70,ok,
+i8gemm,i8gemm_neon,i8,GT_L2,2048,4096,8192,4,106496.0,3,1041.58,ok,
+i8gemm,i8gemm_neon_m16n4,i8,GT_L2,2048,4096,8192,4,106496.0,3,839.76,ok,
+acl,acl_auto,bf16,GT_L2,2048,4096,8192,4,147456.0,3,748.956,ok,selected=sve_interleaved_bf16fp32_mmla_8x3VL; compatible=sve_interleaved_bf16fp32_mmla_8x3VL|sve_hybrid_bf16fp32_mmla_6x4VL|sve_hybrid_bf16fp32_dot_6x4VL|sve_interleaved_bf16fp32_dot_8x3VL|a64_hybrid_bf16fp32_mmla_6x16|a64_interleaved_bf16fp32_mmla_8x12|a64_hybrid_bf16fp32_dot_6x16|a64_interleaved_bf16fp32_dot_8x12|a64_sgemm_8x12
+acl,acl_auto,i8,GT_L2,2048,4096,8192,4,106496.0,3,1499.533,ok,selected=sve_interleaved_s8s32_mmla_8x3VL; compatible=sve_hybrid_s8s32_mmla_6x4VL|sve_interleaved_s8s32_mmla_8x3VL|sve_hybrid_s8s32_dot_6x4VL|sve_interleaved_s8s32_dot_8x3VL|a64_interleaved_s8s32_mmla_8x12|a64_hybrid_s8s32_mmla_6x16|a64_gemm_s16_8x12|a64_hybrid_s8s32_dot_6x16|a64_gemm_s8_8x12|a64_gemm_s8_4x4
+kleidiai,kleidiai_bf16_neon_mmla,bf16,GT_L2,2048,4096,8192,4,147520.0,3,556.341,ok,fixed=kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla; instr=bfmmla; omp=m_blocks
+kleidiai,kleidiai_i8_neon_i8mm,i8,GT_L2,2048,4096,8192,4,106608.0,3,953.894,ok,fixed=kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm; instr=smmla; output=f32_dequant; omp=m_blocks
+i8gemm,i8gemm_sve,bf16,GT_L2,2048,4096,8192,8,147456.0,3,1510.08,ok,
+i8gemm,i8gemm_sve,i8,GT_L2,2048,4096,8192,8,106496.0,3,2686.09,ok,
+i8gemm,i8gemm_neon,bf16,GT_L2,2048,4096,8192,8,147456.0,3,833.00,ok,
+i8gemm,i8gemm_neon,i8,GT_L2,2048,4096,8192,8,106496.0,3,1929.09,ok,
+i8gemm,i8gemm_neon_m16n4,i8,GT_L2,2048,4096,8192,8,106496.0,3,1604.46,ok,
+acl,acl_auto,bf16,GT_L2,2048,4096,8192,8,147456.0,3,1392.059,ok,selected=sve_interleaved_bf16fp32_mmla_8x3VL; compatible=sve_interleaved_bf16fp32_mmla_8x3VL|sve_hybrid_bf16fp32_mmla_6x4VL|sve_hybrid_bf16fp32_dot_6x4VL|sve_interleaved_bf16fp32_dot_8x3VL|a64_hybrid_bf16fp32_mmla_6x16|a64_interleaved_bf16fp32_mmla_8x12|a64_hybrid_bf16fp32_dot_6x16|a64_interleaved_bf16fp32_dot_8x12|a64_sgemm_8x12
+acl,acl_auto,i8,GT_L2,2048,4096,8192,8,106496.0,3,2807.008,ok,selected=sve_interleaved_s8s32_mmla_8x3VL; compatible=sve_hybrid_s8s32_mmla_6x4VL|sve_interleaved_s8s32_mmla_8x3VL|sve_hybrid_s8s32_dot_6x4VL|sve_interleaved_s8s32_dot_8x3VL|a64_interleaved_s8s32_mmla_8x12|a64_hybrid_s8s32_mmla_6x16|a64_gemm_s16_8x12|a64_hybrid_s8s32_dot_6x16|a64_gemm_s8_8x12|a64_gemm_s8_4x4
+kleidiai,kleidiai_bf16_neon_mmla,bf16,GT_L2,2048,4096,8192,8,147520.0,3,1070.373,ok,fixed=kai_matmul_clamp_f32_bf16p8x4_bf16p12x4b_8x12_neon_mmla; instr=bfmmla; omp=m_blocks
+kleidiai,kleidiai_i8_neon_i8mm,i8,GT_L2,2048,4096,8192,8,106608.0,3,1771.729,ok,fixed=kai_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm; instr=smmla; output=f32_dequant; omp=m_blocks

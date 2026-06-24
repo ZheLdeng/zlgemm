@@ -16,6 +16,7 @@ SVE_KERNELS := \
 	$(LIB_DIR)/bf16gemm_sve.S \
 	$(LIB_DIR)/i8gemm_sve.c \
 	$(LIB_DIR)/i8gemm_sve.S \
+	$(LIB_DIR)/i8gemm_hybrid.S \
 	$(LIB_DIR)/i8gemm_pack_a_neon.S
 NEON_KERNELS := \
 	$(LIB_DIR)/bf16gemm_mt.c \
