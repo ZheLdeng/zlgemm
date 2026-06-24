@@ -63,26 +63,41 @@ static int round_up_int(int x, int q) {
 }
 
 /*
- * Choose a 2D thread grid pm x pn (pm*pn == P) over an (mblk x ntiles) tile
- * grid. Each thread owns an M-band and an N-band, so operand A is re-read by
- * pn threads and B by pm threads: aggregate traffic ~ pn*|A| + pm*|B| =
- * K*(pn*M + pm*N). Minimise pn*M + pm*N (traffic-optimal -- puts more threads
- * on the dimension whose operand is cheaper to replicate), subject to BOTH
- * tile dimensions dividing evenly so the grid is perfectly balanced. Returns
- * pm=pn=0 when no even non-trivial grid exists (caller falls back to 1D/2D
- * collapse). Mw/Nw are the M and N extents (any consistent unit).
+ * Choose a 2D thread grid pm x pn over an (mblk x ntiles) tile grid. Each
+ * thread owns an M-band and an N-band, so operand A is re-read by pn threads
+ * and B by pm threads: aggregate traffic ~ pn*|A| + pm*|B| = K*(pn*M + pm*N).
+ *
+ * We do NOT require pm*pn == P or even division: that constraint makes the
+ * grid unusable for non-power-of-2 thread counts (P=79 is prime, P=80=16*5)
+ * exactly when a machine has many cores, which is when it matters most. With
+ * the old even-only picker, a shape like 64x4096x1024 on 79/80 threads found
+ * no grid and fell back to an M-split over ~6 row-blocks -- 70+ idle threads
+ * and a double fork-join -- collapsing to ~1/9 of its t64 throughput.
+ *
+ * Instead, allow uneven bands (the caller distributes the remainder) and
+ * pm*pn <= P. Cap pm <= mblk and pn <= ntiles so we never create empty bands.
+ * Among candidates, maximise utilisation (pm*pn, the number of busy threads)
+ * first, then minimise traffic pn*Mw + pm*Nw (puts more threads on the
+ * dimension whose operand is cheaper to replicate). Returns pm=pn=1 in the
+ * degenerate case; callers act on the grid only when pn>1 (a real 2D split).
+ * Mw/Nw are the M and N extents (any consistent unit).
  */
 static void i8_pick_grid(int mblk, int ntiles, int P, long Mw, long Nw,
                          int *out_pm, int *out_pn) {
-    int best_pm = 0, best_pn = 0;
+    int best_pm = 1, best_pn = 1;
+    long best_use = 0;
     double best_cost = 1e300;
-    for (int pn = 1; pn <= P; pn++) {
-        if (P % pn) continue;
-        int pm = P / pn;
-        if (mblk % pm != 0 || ntiles % pn != 0)
-            continue;
+    int pm_max = P < mblk ? P : mblk;
+    for (int pm = 1; pm <= pm_max; pm++) {
+        int pn = P / pm;
+        if (pn > ntiles)
+            pn = ntiles;
+        if (pn < 1)
+            pn = 1;
+        long use = (long)pm * pn;
         double cost = (double)pn * (double)Mw + (double)pm * (double)Nw;
-        if (cost < best_cost) {
+        if (use > best_use || (use == best_use && cost < best_cost)) {
+            best_use = use;
             best_cost = cost;
             best_pm = pm;
             best_pn = pn;
@@ -92,7 +107,8 @@ static void i8_pick_grid(int mblk, int ntiles, int P, long Mw, long Nw,
     *out_pn = best_pn;
 }
 
-static int i8_sve_effective_threads(int num_threads, int M, int n_tiles) {
+static int i8_sve_effective_threads(int num_threads, int M, int K_r,
+                                    int n_tiles) {
     if (num_threads <= 0)
         num_threads = omp_get_max_threads();
     if (num_threads <= 0)
@@ -108,6 +124,29 @@ static int i8_sve_effective_threads(int num_threads, int M, int n_tiles) {
         work_units = 1;
     if (num_threads > work_units)
         num_threads = work_units;
+
+    /*
+     * Fork-amortisation clamp. A static OpenMP region only pays off if each
+     * worker does enough compute to cover the fork/barrier latency. Cap the
+     * thread count so every thread gets at least I8_SVE_MIN_MACS multiply-adds.
+     * The 512Ki default is calibrated so it NEVER reduces the small shapes the
+     * 8-core dev machine already runs at full width (the smallest benchmarked
+     * shapes, 64x128x512 = 4.2M macs, still allow >=8 threads), while it trims
+     * the gross oversubscription that collapses the same shapes at 64/80
+     * threads -- e.g. 64x512x256 (8.4M macs) caps at 16, matching its measured
+     * t16 peak on the 80-core machine. Set I8_SVE_MIN_MACS=0 to disable.
+     */
+    const char *mm_env = getenv("I8_SVE_MIN_MACS");
+    long min_macs = mm_env ? atol(mm_env) : (512L << 10);
+    if (min_macs > 0) {
+        long total_macs = (long)M * (long)K_r *
+                          (long)(n_tiles * i8_sve_n_tile());
+        int mac_cap = (int)(total_macs / min_macs);
+        if (mac_cap < 1)
+            mac_cap = 1;
+        if (num_threads > mac_cap)
+            num_threads = mac_cap;
+    }
 
     if (M < 64 && n_tiles < num_threads * 4) {
         int by_n = (n_tiles + 3) / 4;
@@ -482,7 +521,7 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
                         int num_threads) {
     const int n_tile = i8_sve_n_tile();
     const int n_tiles = N_r / n_tile;
-    num_threads = i8_sve_effective_threads(num_threads, M, n_tiles);
+    num_threads = i8_sve_effective_threads(num_threads, M, K_r, n_tiles);
 
     if (i8_use_hybrid_for_shape(M, K_r, N_r, num_threads)) {
         if (num_threads <= 1) {
@@ -503,8 +542,12 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
             // Pick a balanced, traffic-optimal 2D thread grid pm x pn that
             // divides BOTH the m-block and n-panel counts evenly. gpm/gpn stay
             // 0 when no even grid exists.
-            int gpm = 0, gpn = 0;
+            int gpm = 1, gpn = 1;
             i8_pick_grid(mblk, nt, num_threads, M, N_r, &gpm, &gpn);
+            // A pure M-split only has `mblk` units of parallelism; once that is
+            // below the thread count most threads idle (the high-core-count
+            // collapse), so engage the 2D grid even for small shapes there.
+            const int starved = (mblk < num_threads);
             // Default distribution heuristic:
             //   * an even 2D grid with pn>1 (mode 4) when one exists -> best
             //     balance + least bandwidth (192/224/256: +1..5%);
@@ -521,10 +564,10 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
             const int big = (M >= 128 && N_r >= 128);
             const char *mtenv = getenv("I8_SVE_HYBMT");
             int mtmode = mtenv ? atoi(mtenv)
+                       : (gpn > 1 && (big || starved)) ? 4
                        : (!big ? 0
-                          : gpn > 1 ? 4
                           : (mblk % num_threads != 0 ? 2 : 0));
-            if (mtmode == 4 && gpn == 0) {   // env-forced grid: derive factors
+            if (mtmode == 4 && gpn <= 1) {   // env-forced grid: derive factors
                 gpn = (num_threads % 2 == 0 && nt >= 2) ? 2 : 1;
                 gpm = num_threads / gpn;
             }
@@ -585,7 +628,10 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
                 // is pn*|A| + pm*|B| vs M-split's |A| + P*|B|. For P=8 a 4x2
                 // grid roughly halves it -> helps when bandwidth-bound.
                 int pn = gpn, pm = gpm;
-                #pragma omp parallel num_threads(num_threads)
+                // Spawn exactly pm*pn workers (<= num_threads): with an uneven
+                // grid pm*pn may be < num_threads, and any tid >= pm*pn would
+                // map past the n-tile grid and write out of bounds.
+                #pragma omp parallel num_threads(pm * pn)
                 {
                     int tid = omp_get_thread_num();
                     int pr = tid % pm, pc = tid / pm;
@@ -649,8 +695,11 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
      * pn*|A| + pm*|B| and removes the straggler when the block count does not
      * divide num_threads. Reuses the per-row-block A-reorder prepared above;
      * row-blocks are the m12 12-row blocks followed by the 8-row tail blocks.
-     * Falls back to the existing M/N-split when no even grid exists.
-     * I8_SVE_PACK2D=0 forces the old path for comparison.
+     * The grid is uneven (pm*pn <= num_threads, remainder bands spread one
+     * extra unit each), so it stays balanced for non-power-of-2 / prime thread
+     * counts -- the case that made a pure M-split over ~6 row-blocks collapse
+     * at 79/80 threads. Falls back to the existing M/N-split when no useful
+     * 2D grid exists (gpn<=1). I8_SVE_PACK2D=0 forces the old path.
      */
     const char *pack2d_env = getenv("I8_SVE_PACK2D");
     int pack2d = !(pack2d_env && atoi(pack2d_env) == 0);
@@ -676,13 +725,20 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
         !use_n_split && grid_worth)
         i8_pick_grid(nb_rows, n_tiles, num_threads, M, N_r, &gpm, &gpn);
 
-    if (gpm > 0 && gpn > 1) {
-        #pragma omp parallel num_threads(num_threads)
+    if (gpn > 1) {
+        // Spawn exactly pm*pn workers (<= num_threads) so every tid maps to a
+        // valid band; remaining row-blocks / n-tiles are spread one-per-band.
+        int gthreads = gpm * gpn;
+        #pragma omp parallel num_threads(gthreads)
         {
             int tid = omp_get_thread_num();
             int pr = tid % gpm, pc = tid / gpm;
-            int rb = nb_rows / gpm, r0 = pr * rb, r1 = r0 + rb;
-            int tb = n_tiles / gpn, t0 = pc * tb, t1 = t0 + tb;
+            int bq = nb_rows / gpm, brem = nb_rows % gpm;
+            int r0 = pr * bq + (pr < brem ? pr : brem);
+            int r1 = r0 + bq + (pr < brem ? 1 : 0);
+            int tq = n_tiles / gpn, trem = n_tiles % gpn;
+            int t0 = pc * tq + (pc < trem ? pc : trem);
+            int t1 = t0 + tq + (pc < trem ? 1 : 0);
             int n0 = t0 * n_tile;
             int ncols = (t1 - t0) * n_tile;
             const i8_t *B_tile = B_reo + (size_t)t0 * K_r * n_tile;
@@ -774,7 +830,7 @@ void i8gemm_mt_dispatch_f(const i8_t *A, const i8_t *B_reo,
                           int num_threads) {
     const int n_tile = i8_sve_n_tile();
     const int n_tiles = N_r / n_tile;
-    num_threads = i8_sve_effective_threads(num_threads, M, n_tiles);
+    num_threads = i8_sve_effective_threads(num_threads, M, K_r, n_tiles);
     const int use_n_split =
         i8_sve_use_n_split(M, K_r, N_r, n_tiles, num_threads);
     const int use_a_reorder = i8_use_a_reorder_for_shape(K_r, n_tiles);
@@ -811,7 +867,7 @@ void i8gemm_mt_dispatch_bias_f(const i8_t *A, const i8_t *B_reo,
                                int num_threads, const f32_t *bias) {
     const int n_tile = i8_sve_n_tile();
     const int n_tiles = N_r / n_tile;
-    num_threads = i8_sve_effective_threads(num_threads, M, n_tiles);
+    num_threads = i8_sve_effective_threads(num_threads, M, K_r, n_tiles);
     const int use_n_split =
         i8_sve_use_n_split(M, K_r, N_r, n_tiles, num_threads);
     const int use_a_reorder = i8_use_a_reorder_for_shape(K_r, n_tiles);
