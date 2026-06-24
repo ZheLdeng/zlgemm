@@ -1139,6 +1139,7 @@ build_dispatch() {
                 "$LIB_DIR/bf16gemm_k_bias.S" \
                 "$LIB_DIR/i8gemm_mt.c" "$LIB_DIR/i8gemm_k.S" \
                 "$LIB_DIR/i8gemm_k_bias.S" \
+                "$LIB_DIR/i8gemm_m16n4.c" "$LIB_DIR/i8gemm_m16n4.S" \
                 "$LIB_DIR/i8gemm_pack_a_neon.S" \
                 -o "$bin" -lm
             ;;
