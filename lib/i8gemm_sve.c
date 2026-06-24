@@ -62,6 +62,36 @@ static int round_up_int(int x, int q) {
     return ((x + q - 1) / q) * q;
 }
 
+/*
+ * Choose a 2D thread grid pm x pn (pm*pn == P) over an (mblk x ntiles) tile
+ * grid. Each thread owns an M-band and an N-band, so operand A is re-read by
+ * pn threads and B by pm threads: aggregate traffic ~ pn*|A| + pm*|B| =
+ * K*(pn*M + pm*N). Minimise pn*M + pm*N (traffic-optimal -- puts more threads
+ * on the dimension whose operand is cheaper to replicate), subject to BOTH
+ * tile dimensions dividing evenly so the grid is perfectly balanced. Returns
+ * pm=pn=0 when no even non-trivial grid exists (caller falls back to 1D/2D
+ * collapse). Mw/Nw are the M and N extents (any consistent unit).
+ */
+static void i8_pick_grid(int mblk, int ntiles, int P, long Mw, long Nw,
+                         int *out_pm, int *out_pn) {
+    int best_pm = 0, best_pn = 0;
+    double best_cost = 1e300;
+    for (int pn = 1; pn <= P; pn++) {
+        if (P % pn) continue;
+        int pm = P / pn;
+        if (mblk % pm != 0 || ntiles % pn != 0)
+            continue;
+        double cost = (double)pn * (double)Mw + (double)pm * (double)Nw;
+        if (cost < best_cost) {
+            best_cost = cost;
+            best_pm = pm;
+            best_pn = pn;
+        }
+    }
+    *out_pm = best_pm;
+    *out_pn = best_pn;
+}
+
 static int i8_sve_effective_threads(int num_threads, int M, int n_tiles) {
     if (num_threads <= 0)
         num_threads = omp_get_max_threads();
@@ -470,20 +500,11 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
         } else {
             int mblk = (M + 7) / 8;          // total 8-row blocks
             int nt = N_r / n_tile;
-            // Pick a balanced 2D thread grid pm x pn (= num_threads) that
-            // divides BOTH the m-block count and the n-panel count evenly.
-            // Such a grid both load-balances and minimises redundant A/B
-            // streaming (aggregate traffic ~ pn*|A| + pm*|B|, least when
-            // pm+pn is smallest, i.e. the most square grid). gpm/gpn stay 0
-            // when no even grid exists.
-            int gpm = 0, gpn = 0, gbest = 0x7fffffff;
-            for (int pn = 1; pn <= num_threads; pn++) {
-                if (num_threads % pn) continue;
-                int pm = num_threads / pn;
-                if (mblk % pm == 0 && nt % pn == 0 && pm + pn < gbest) {
-                    gbest = pm + pn; gpm = pm; gpn = pn;
-                }
-            }
+            // Pick a balanced, traffic-optimal 2D thread grid pm x pn that
+            // divides BOTH the m-block and n-panel counts evenly. gpm/gpn stay
+            // 0 when no even grid exists.
+            int gpm = 0, gpn = 0;
+            i8_pick_grid(mblk, nt, num_threads, M, N_r, &gpm, &gpn);
             // Default distribution heuristic:
             //   * an even 2D grid with pn>1 (mode 4) when one exists -> best
             //     balance + least bandwidth (192/224/256: +1..5%);
@@ -621,7 +642,53 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
             i8_scratch(&g_a_poolA, &g_a_capA,
                        (size_t)((M + 7) / 8) * a_stride)) : NULL;
 
-    if (!use_n_split) {
+    /*
+     * 2D thread grid over (row-block x n-tile) for the packed path. Pure
+     * full-N M-split makes every thread re-stream all of B; a balanced grid
+     * (each thread owns an M-band and an N-band) cuts aggregate A/B traffic to
+     * pn*|A| + pm*|B| and removes the straggler when the block count does not
+     * divide num_threads. Reuses the per-row-block A-reorder prepared above;
+     * row-blocks are the m12 12-row blocks followed by the 8-row tail blocks.
+     * Falls back to the existing M/N-split when no even grid exists.
+     * I8_SVE_PACK2D=0 forces the old path for comparison.
+     */
+    const char *pack2d_env = getenv("I8_SVE_PACK2D");
+    int pack2d = !(pack2d_env && atoi(pack2d_env) == 0);
+    int nb_rows = use_m12 ? (m12_blocks + (tail_M + 7) / 8) : ((M + 7) / 8);
+    int gpm = 0, gpn = 0;
+    if (pack2d && num_threads > 1 && use_a_reorder && n_tiles >= 2)
+        i8_pick_grid(nb_rows, n_tiles, num_threads, M, N_r, &gpm, &gpn);
+
+    if (gpm > 0 && gpn > 1) {
+        #pragma omp parallel num_threads(num_threads)
+        {
+            int tid = omp_get_thread_num();
+            int pr = tid % gpm, pc = tid / gpm;
+            int rb = nb_rows / gpm, r0 = pr * rb, r1 = r0 + rb;
+            int tb = n_tiles / gpn, t0 = pc * tb, t1 = t0 + tb;
+            int n0 = t0 * n_tile;
+            int ncols = (t1 - t0) * n_tile;
+            const i8_t *B_tile = B_reo + (size_t)t0 * K_r * n_tile;
+            for (int r = r0; r < r1; r++) {
+                if (use_m12 && r < m12_blocks) {
+                    int m0 = r * 12;
+                    i8_dispatch_i32_m12(A + (size_t)m0 * K_r, B_tile,
+                                        C + (size_t)m0 * N_r + n0,
+                                        K_r, ncols, N_r,
+                                        A_reo_m12_pool + (size_t)r * a_stride_m12);
+                } else {
+                    int rt = use_m12 ? (r - m12_blocks) : r;
+                    int m0 = (use_m12 ? m12_rows : 0) + rt * 8;
+                    int mb = M - m0 < 8 ? M - m0 : 8;
+                    i8_t *pool = use_m12 ? A_reo_tail_pool : A_reo_pool;
+                    i8_t *areo = pool ? pool + (size_t)rt * a_stride : NULL;
+                    i8_dispatch_i32(A + (size_t)m0 * K_r, B_tile,
+                                    C + (size_t)m0 * N_r + n0,
+                                    mb, K_r, ncols, N_r, 1, areo);
+                }
+            }
+        }
+    } else if (!use_n_split) {
         if (use_m12) {
             #pragma omp parallel for num_threads(num_threads) schedule(static)
             for (int b = 0; b < m12_blocks; b++) {
