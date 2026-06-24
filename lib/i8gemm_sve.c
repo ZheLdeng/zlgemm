@@ -656,7 +656,24 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
     int pack2d = !(pack2d_env && atoi(pack2d_env) == 0);
     int nb_rows = use_m12 ? (m12_blocks + (tail_M + 7) / 8) : ((M + 7) / 8);
     int gpm = 0, gpn = 0;
-    if (pack2d && num_threads > 1 && use_a_reorder && n_tiles >= 2)
+    /*
+     * Only deviate from the existing M-split / n-split here when the 2D grid
+     * is predicted to win, to avoid regressing shapes the old paths handle
+     * well. Two triggers (measured on V1):
+     *   (a) load balance -- too few row-blocks to fill all threads with a pure
+     *       M-split (nb_rows < num_threads), so some threads idle;
+     *   (b) B re-streaming -- in M-split each thread re-reads the full B
+     *       (K*N bytes) once per m-block it owns; when that per-thread volume
+     *       is large the grid's N-banding cuts it by pn.
+     * Leave the tuned n-split path (use_n_split) untouched: overriding it
+     * regressed large-N / large-B shapes.
+     */
+    int per_thread_blocks = (nb_rows + num_threads - 1) / num_threads;
+    size_t restream_bytes = (size_t)per_thread_blocks * (size_t)K_r * (size_t)N_r;
+    int grid_worth = (nb_rows < num_threads) ||
+                     (restream_bytes >= (256u << 10));
+    if (pack2d && num_threads > 1 && use_a_reorder && n_tiles >= 2 &&
+        !use_n_split && grid_worth)
         i8_pick_grid(nb_rows, n_tiles, num_threads, M, N_r, &gpm, &gpn);
 
     if (gpm > 0 && gpn > 1) {
