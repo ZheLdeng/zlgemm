@@ -257,14 +257,21 @@ int main(int argc, char **argv) {
     }
     if (threads < 1 || stride_factor < 1 || batch_count < 1)
         return 2;
+    /* This standalone M8 microkernel bench only supports aligned shapes
+     * (M multiple of 8, K multiple of 16, N multiple of the SVE n-tile).
+     * Unsupported shapes are SKIPPED (no CSV row, exit 0) rather than
+     * treated as an error, so a grid/shape sweep that includes unaligned
+     * cases (e.g. K=4) does not abort the whole run under `set -e`. The
+     * integrated dispatch path handles such shapes and is measured
+     * separately via RUN_DISPATCH. */
     if (M % 8 != 0) {
-        fprintf(stderr, "M must be a multiple of 8 for this M8 bench: %d\n", M);
-        return 2;
+        fprintf(stderr, "[skip] i8 M8 parts: M=%d not a multiple of 8\n", M);
+        return 0;
     }
     if (K % 16 != 0 || N % i8_bench_n_tile() != 0) {
-        fprintf(stderr, "K/N must be aligned for this I8 M8 bench: K=%d N=%d tile=%d\n",
+        fprintf(stderr, "[skip] i8 M8 parts: K/N not aligned (K=%d N=%d tile=%d)\n",
                 K, N, i8_bench_n_tile());
-        return 2;
+        return 0;
     }
 
     const double peak_gops = 660.0;
