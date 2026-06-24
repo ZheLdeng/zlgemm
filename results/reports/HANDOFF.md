@@ -3,6 +3,12 @@
 > 目的：让另一个 Claude/工程师无需上下文即可接手。记录目标、平台、已做的改动、
 > 验证方式、性能现状、关键发现，以及下一步。
 
+> **2026-06-24 — 80 核华为机器调度工作另起一份专门交接：见
+> [`huawei_80c_scheduling_progress_2026-06-24.md`](huawei_80c_scheduling_progress_2026-06-24.md)**。
+> 内容：基于 `results/m8/m8_results_new.xlsx` 定位的三个调度缺陷；t79/t80 线程划分坍塌
+> (−60..−89%) 已修并验证 (commit `d8dcf48`, branch `sched-linearity-opt`)；
+> 微内核 50% 计算天花板与 NEON/SVE 路由两项待续(需华为机器)。
+
 ## 0. 一句话现状
 i8gemm 的 SVE i8 路径经过本轮优化后，在**小/中/偏斜形状**上已普遍追平或超过 ACL，
 **bf16 在所有测试点领先 ACL 和 KleidiAI**；剩余差距是 **i8 中等立方体 (192–256³) 在 8 线程**
