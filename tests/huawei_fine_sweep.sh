@@ -32,7 +32,7 @@ echo "#  THREADS='$THREADS' RUNS=$RUNS PEAK=$PEAK/core  nproc=$NPROC"
 echo "############################################################"
 
 make -C "$LIB" sve >/dev/null 2>&1 || { echo "LIB BUILD FAILED"; exit 1; }
-if [ ! -x "$B" ] || [ "${FORCE_BUILD:-0}" = 1 ]; then
+if [ ! -x "$B" ] || [ "$LIB/i8gemm_sve.c" -nt "$B" ] || [ "${FORCE_BUILD:-0}" = 1 ]; then
   mkdir -p build; STUB=build/_m16n4_stub.c
   cat > "$STUB" <<'EOF'
 #include <stdint.h>

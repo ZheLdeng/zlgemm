@@ -34,7 +34,7 @@ echo "############################################################"
 # ---------- 1. build ----------
 echo; echo "== [1/4] build lib + bench =="
 make -C "$LIB" sve >/dev/null 2>&1 || { echo "LIB BUILD FAILED"; exit 1; }
-if [ ! -x "$B" ] || [ "${FORCE_BUILD:-0}" = 1 ]; then
+if [ ! -x "$B" ] || [ "$LIB/i8gemm_sve.c" -nt "$B" ] || [ "${FORCE_BUILD:-0}" = 1 ]; then
   echo "  compiling $B ..."
   mkdir -p build
   # The experimental NEON-i8mm m16n4 path (i8gemm_m16n4.{c,S}) is irrelevant to

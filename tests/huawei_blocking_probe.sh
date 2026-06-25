@@ -18,7 +18,22 @@ LIB=../lib; B=build/bench_dispatch_i8gemm_sve
 CORES="${CORES:-0-$(( $(nproc)-1 ))}"
 RUNS="${RUNS:-4}"
 export GOMP_CPU_AFFINITY="$CORES" OMP_PLACES=cores OMP_PROC_BIND=close
-[ -x "$B" ] || { echo "build $B first (run huawei_fine_sweep.sh once)"; exit 1; }
+# (re)build the bench if missing OR older than the lib source (so a git pull is
+# picked up), stubbing the experimental NEON-i8mm m16n4 path.
+if [ ! -x "$B" ] || [ "$LIB/i8gemm_sve.c" -nt "$B" ] || [ "${FORCE_BUILD:-0}" = 1 ]; then
+  echo "building $B ..."; mkdir -p build; STUB=build/_m16n4_stub.c
+  cat > "$STUB" <<'EOF'
+#include <stdint.h>
+void i8gemm_mt_dispatch(const int8_t*, const int8_t*, int32_t*, int, int, int, int);
+void i8gemm_mt_dispatch_m16n4(const int8_t* A, const int8_t* B, int32_t* C,
+                              int M, int K, int N, int t){ i8gemm_mt_dispatch(A,B,C,M,K,N,t); }
+EOF
+  make -C "$LIB" sve >/dev/null 2>&1
+  cc -O3 -Wall -fopenmp -mcpu=native -I"$LIB" -DBENCH_SVE -o "$B" \
+    bench_dispatch_types.c "$STUB" $LIB/bf16gemm_sve.c $LIB/bf16gemm_sve.S \
+    $LIB/i8gemm_sve.c $LIB/i8gemm_sve.S $LIB/i8gemm_hybrid.S \
+    $LIB/i8gemm_pack_a_neon.S -lm || { echo "BENCH BUILD FAILED"; exit 1; }
+fi
 
 g(){ env "$1" $B i8gemm_sve i8 "$2" "$3" "$4" "$5" 1 "$RUNS" "$6" 2>/dev/null | awk -F, '{print $11}'; }
 
