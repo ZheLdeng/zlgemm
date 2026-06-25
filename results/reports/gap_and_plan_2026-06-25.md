@@ -186,6 +186,14 @@ SVE i8 `compute_only` 到 64 核近线性（~11451 GOPS，效率~1.0），80 核
 
 华为 gemv_clamp 实测：1×4096×1024 default 266→hybrid 437；1×4096×4096 780→1164；1×11008×4096 1245→1610；1×4096×11008 1300→1541。
 
+## #1 模型校准（拟合 247 形状 fine_sweep knee）
+`recommend_threads` 改为 **B-panel 门控**模型（commit 见下）：`t=min(maxT, work_units)`，仅当
+B 面板 `K_r*N_r > I8_REC_CACHE`(默认 2Mi) 时再按 `macs/I8_REC_MACS`(默认 512Ki) 收缩。
+对 247 真实 knee 拟合：**~97% 形状 pred≥knee（不丢 GOPS）**、far-below<knee/2 仅 2–3%、平均
+用 ~54 核（vs 64）。纯 macs-floor（无 B 门控）只有 76% 安全、19% 丢 GOPS，故采用 B 门控。
+局限：仍**抓不住带宽饱和的中等形状**（如 32×4096×1024 knee=16，macs 够大过不了 floor）——
+其 knee 由 B-streaming 速率决定、非总 macs；精确 knee 需 per-machine sweep 调 `I8_REC_MACS/CACHE`。
+
 **真正剩余的硬骨头（均为调度/带宽，非微内核）**：
 - (a) 中等形状过度并行：#1 advisory 已给，默认全自动需华为带宽/LLC 模型（单一 floor 区分不了"带宽饱和中等形状"vs"可在N上扩展的小B形状"）。
 - (b) 窄N + 大M + 大K 的 B 重复 streaming：需 ACL 式 2D/K cache-blocking（大工程）。

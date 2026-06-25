@@ -193,17 +193,19 @@ static int i8_sve_effective_threads(int num_threads, int M, int K_r,
 /*
  * Advisory thread recommendation (the "knee"): the fewest threads that still
  * reach near-peak GOPS for this shape. Parallelism is bounded by the work-unit
- * count (mblk * n_tiles); beyond that, extra threads only add fork/bandwidth
- * overhead. We also cap by a per-thread MAC floor (I8_REC_MACS, default 4Mi) so
- * bandwidth-bound medium shapes are not over-subscribed. NOTE: this is ADVISORY
- * and the floor is hardware-dependent -- a single floor cannot tell a
- * bandwidth-saturated medium shape (wants few threads) from a cache-resident
- * small-B shape that genuinely scales on N (wants many). Callers in latency
- * mode, or with small cache-resident B, should pass their own count. Calibrate
- * I8_REC_MACS against tests/huawei_fine_sweep.sh knees for a given machine.
- * Does NOT change i8gemm_mt_dispatch unless the caller passes num_threads<=0 AND
- * sets I8_SVE_AUTO_THREADS=1 (opt-in), so the validated explicit-thread path is
- * untouched.
+ * count (mblk * n_tiles). Beyond that, extra threads help only until the shape
+ * saturates memory bandwidth -- which happens early for a LARGE B panel but not
+ * for a small (cache-resident) B that keeps scaling on N. So we only apply the
+ * per-thread MAC floor (I8_REC_MACS, default 512Ki) when the B panel
+ * (K_r*N_r bytes) exceeds I8_REC_CACHE (default 2Mi); small-B shapes scale on
+ * work-units. This B-gated model was fitted to the Huawei 247-shape fine-sweep
+ * knees: ~97% of shapes get a count >= their measured knee (no GOPS loss),
+ * while bandwidth-bound large-B shapes are trimmed. NOTE: it is still
+ * conservative -- it does NOT catch bandwidth-saturated *medium* shapes (whose
+ * knee is set by B-streaming rate, not total MACs); exact knees need a per-
+ * machine sweep (tests/huawei_fine_sweep.sh) to tune I8_REC_MACS/I8_REC_CACHE.
+ * ADVISORY/opt-in only: i8gemm_mt_dispatch uses it solely when num_threads<=0
+ * AND I8_SVE_AUTO_THREADS=1; the validated explicit-thread path is untouched.
  */
 int i8gemm_recommend_threads(int M, int K_r, int N_r, int max_threads) {
     if (max_threads <= 0)
@@ -218,12 +220,15 @@ int i8gemm_recommend_threads(int M, int K_r, int N_r, int max_threads) {
     if (mblk < 1)
         mblk = 1;
     long units = (long)mblk * (long)n_tiles;     /* upper bound on parallelism */
-    const char *e = getenv("I8_REC_MACS");
-    long floor = e ? atol(e) : (4L << 20);        /* per-thread MAC floor */
     long t = max_threads;
     if (t > units)
         t = units;
-    if (floor > 0) {
+    const char *fe = getenv("I8_REC_MACS");
+    long floor = fe ? atol(fe) : (512L << 10);    /* per-thread MAC floor */
+    const char *ce = getenv("I8_REC_CACHE");
+    long cache = ce ? atol(ce) : (2L << 20);      /* B-panel cache threshold */
+    long b_bytes = (long)K_r * (long)N_r;
+    if (floor > 0 && b_bytes > cache) {           /* bandwidth-bound: trim */
         long macs = (long)M * (long)K_r * (long)N_r;
         long cap = macs / floor;
         if (cap < 1)
