@@ -242,6 +242,16 @@ static int bf16_use_2d_split(int M, int K_r, int N_r, int n_tiles,
     const int m_units = (M + 7) / 8;
     if (m_units < 2 || n_tiles < 1)
         return 0;
+    /*
+     * Narrow-N guard (mirrors the i8 n_tiles>=8 fix). With very few N tiles the
+     * 2D (m_unit x n_tile) collapse loses badly to a plain M-split -- measured
+     * on Huawei 80c: 2048x16384x24 (n_tiles=2) @t64 collapse=795 vs M-split=1465
+     * (+85%), @t48 +58%, @t32 +36%. At n_tiles>=4 the collapse is fine
+     * (2048x4096x64 @t32 2D=1865 > M-split). So require >=4 N tiles for 2D;
+     * narrower N falls back to the M-split, which streams B per row-band.
+     */
+    if (n_tiles < 4)
+        return 0;
     if ((size_t)m_units * (size_t)n_tiles < (size_t)num_threads * 2)
         return 0;
     return M >= 64 || N_r >= 64;

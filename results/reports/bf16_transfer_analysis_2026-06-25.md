@@ -34,3 +34,22 @@ CORES=0-79 bash tests/huawei_bf16_probe.sh 2>&1 | tee bf16_probe.log            
 - fine_sweep(bf16) 给出 bf16 各形状利用率范围 + 拐点线程，对照 i8 找 bf16 特有弱点。
 
 把这两个 log 发我，我按 i8 同样的数据驱动流程优化 bf16（只改数据支持的项）。
+
+---
+
+## 4. 华为 bf16 实测结果（更新：窄 N 修复**确实迁移**）
+跑了 `huawei_bf16_probe.sh` + `DT=bf16 huawei_fine_sweep.sh`（CORES=0-79, RUNS=4）。
+
+### ✅ 窄 N（n_tiles=2）：2D collapse 确实有病 → 已修
+之前 V1 8 核（过订阅）误判为"无病"；**真华为数据推翻**：
+- `2048×16384×24`（N=24→n_tiles=2）：default(2D)=795 vs M-split=**1465 @t64（+85%）**、t48 +58%、t32 +36%。
+- `2048×4096×64`（n_tiles=4）：default 2D=1865 最优（2D 没病）。
+→ **修复**：`bf16_use_2d_split` 加 `n_tiles >= 4` 门控（窄 N 退回 M-split）。这是 i8 `n_tiles>=8` 修复的 bf16 版（bf16 阈值更低，因 collaple 比 i8 的 pick_grid 更耐窄 N）。正确性验证：`check_bf16_split` 8 形状 × {default,m,n,2d} 全 OK。**待华为复测确认 default 吃到 +36–85%**。
+
+### 🔶 其余（default 已够好或属微内核，不改调度）
+- 小 M / GEMV（`8×4096×1024`、`1×4096×4096`）：default(走 n-split/2d) 已好，forced-m 才崩（M-split 无法并行）→ **i8 的 GEMV clamp 饿死问题不在 bf16**（bf16 默认就路由到 n-split/2d），不改。
+- 256³ @t16：n-split 比 default(M-split) +31%，但 t32/t64 收敛 → 边际，暂不动（动 use_n_split 风险大）。
+- **bf16 单核利用率仅 ~48%（峰值 185.4）**，远低于 i8 的 96% → 这是**微内核/峰值标定**问题（非调度），需单独排查（perf 看 bfmmla 发射率 / 确认 185.4 峰值口径），不在本次调度迁移范围。
+
+## 5. 结论
+i8 的调度优化迁移到 bf16：**窄 N 修复迁移成功（+36–85%，已落地 n_tiles>=4 门控）**；t79/GEMV-clamp 不适用（结构不同/已处理）；剩 bf16 单核微内核利用率偏低是独立的后续项。
