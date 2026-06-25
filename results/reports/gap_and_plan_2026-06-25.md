@@ -47,3 +47,37 @@ Scheme: arrange P threads as (m_groups x k_slices).
   C directly (pure M-split, zero overhead).
 Reuses `i8_pack_B`; one small asm kernel (`i8gemm_msk`, hybrid + explicit B n-panel stride so a
 K-slice can be swept over full N in a single call). Bit-exact (i32 add associative).
+
+## 5. Round-1 results (implemented + committed, branch i8-msplit-and-smallm-opt)
+- **gap #1 fixed** (small-M hybrid routing M<=16,K<=1024 + path-aware fork clamp):
+  `8x512x512 @t8` 0.57 -> 1.21x ACL, @t4 0.68 -> 0.94, scales cleanly. No regression
+  on M>=24, large shapes, or small-M deep-K (still 1.1-1.8x). 6000 correctness cases pass.
+- **msplit lib**: M-split-only + split-K, 7168/7168 bit-exact. Within the M-split-only
+  paradigm split-K gives 1.5-2.6x over naive M-split for small M at high threads.
+  vs the M+N main lib it is lower for tiny memory-bound shapes (N-split streams each B
+  panel once; split-K pays reduction + private-buffer traffic) and matches/wins where
+  M-banding fills the threads (64x512 t8 1.03, 128x1024 t8 1.06).
+
+## 6. Stable residual gaps (runs=8, after round-1) and root cause
+```
+ single-thread:  128x128x128 t1 0.74  32x256x256 t1 0.82  16x128x128 t1 0.84  256^3 t1 0.95
+ K=256/N=256 t4: 64x256x256 0.86  256^3 0.88  128x256x256 0.89  32x256x256 0.92  (t8 ~parity, grid mode)
+ N=512 cubes t8: 64x512x512 0.87  128x512x512 0.92  256x512x512 0.95  512^3 0.98
+```
+All residual gaps are **overhead/issue-bound at small-medium sizes**, and trace to one
+root cause: our i8 microkernel is **8x2VL (8 rows x 16 cols)** while ACL's winning kernel
+is **sve_hybrid_s8s32_mmla_6x4VL (6 rows x 32 cols)**. The wider N-tile halves the number
+of N-tile iterations (and per-tile pipeline fill/drain + A-broadcast setup), which is what
+ACL amortises better when K/N are small. Scheduling is now essentially optimal here (the
+2D-grid mode picks well; N-split/M-split/grid were measured and grid wins for K=256 cubes).
+
+### Recommendation for the deep round-2 lever (needs a decision)
+The only remaining lever is a **wider (4VL) i8 microkernel**. Caveats before investing:
+- It is a large, correctness-risky asm effort (accumulator pressure: 6x4VL uses most of the
+  z-register file).
+- It is **V1-specific**. On the Huawei target smmla issues at **1/cycle (half of V1)**, so
+  medium/small cubes there are compute-bound at the smmla unit, not issue/overhead-bound --
+  a V1-tuned wider kernel may give little or nothing on Huawei. The round-1 scheduling wins
+  (gap #1, msplit split-K) are hardware-portable; the microkernel-width gap is not.
+Suggest validating the bottleneck on Huawei (perf: smmla issue rate vs stall_backend on a
+128^3 single-thread run) before building a 4VL kernel.
