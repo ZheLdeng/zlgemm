@@ -52,9 +52,6 @@ static int i8_sve_segments(void) {
 }
 
 static int i8_sve_n_tile(void) {
-    const char *env = getenv("I8_SVE_N3");
-    if (env && atoi(env) != 0)
-        return 3 * (int)svcntw();
     return i8_sve_segments() * 8;
 }
 
@@ -278,28 +275,6 @@ static int i8_sve_use_n_split(int M, int K_r, int N_r, int n_tiles,
 }
 
 void i8_pack_B(const i8_t *B, i8_t *B_reo, int K, int N) {
-    const char *n3_env = getenv("I8_SVE_N3");
-    if (n3_env && atoi(n3_env) != 0) {
-        const int segs = i8_sve_segments();
-        const int n_tile = segs * 12;
-        int idx = 0;
-
-        for (int nb = 0; nb < N; nb += n_tile) {
-            for (int rb = 0; rb < K / 8; rb++) {
-                int row_base = rb * 8;
-                for (int cp = 0; cp < 6; cp++) {
-                    for (int sg = 0; sg < segs; sg++) {
-                        int col_base = nb + sg * 12 + cp * 2;
-                        for (int j = 0; j < 2; j++)
-                            for (int i = 0; i < 8; i++)
-                                B_reo[idx++] = B[(row_base + i) * N + col_base + j];
-                    }
-                }
-            }
-        }
-        return;
-    }
-
     const int segs = i8_sve_segments();
     const int n_tile = segs * 8;
     int idx = 0;
@@ -326,8 +301,6 @@ void i8gemm_k_nld(const i8_t *A, const i8_t *B_reo, i32_t *C,
                   i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_nld_m12(const i8_t *A, const i8_t *B_reo, i32_t *C,
                       i8_t *A_reorder, const gemm_params_t *params);
-void i8gemm_k_nld_n3(const i8_t *A, const i8_t *B_reo, i32_t *C,
-                     i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_ld1(const i8_t *A, const i8_t *B_reo, i32_t *C,
                   i8_t *A_reorder, const gemm_params_t *params);
 void i8gemm_k_nld1(const i8_t *A, const i8_t *B_reo, i32_t *C,
@@ -424,9 +397,6 @@ static size_t i8_a_reorder_stride_m12(int K_r) {
 }
 
 static int i8_use_a_reorder_for_shape(int K_r, int n_tiles) {
-    const char *n3_env = getenv("I8_SVE_N3");
-    if (n3_env && atoi(n3_env) != 0)
-        return 1;
     const char *env = getenv("I8_SVE_NO_A_REORDER");
     if (env && atoi(env) != 0)
         return 0;
@@ -434,9 +404,6 @@ static int i8_use_a_reorder_for_shape(int K_r, int n_tiles) {
 }
 
 static int i8_use_m12_for_shape(int M, int K_r, int n_tiles) {
-    const char *n3_env = getenv("I8_SVE_N3");
-    if (n3_env && atoi(n3_env) != 0)
-        return 0;
     const char *env = getenv("I8_SVE_NO_M12");
     if (env && atoi(env) != 0)
         return 0;
@@ -560,11 +527,6 @@ static void i8_dispatch_i32(const i8_t *A, const i8_t *B_reo, i32_t *C,
                             int M, int K_r, int N_r, int ldc,
                             int no_load, i8_t *A_reorder) {
     gemm_params_t p = {M, K_r, N_r, K_r, K_r, ldc};
-    const char *n3_env = getenv("I8_SVE_N3");
-    if (no_load && A_reorder && n3_env && atoi(n3_env) != 0) {
-        i8gemm_k_nld_n3(A, B_reo, C, A_reorder, &p);
-        return;
-    }
 
     if (no_load) {
         if (M <= 1)
@@ -624,24 +586,22 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
                         int num_threads) {
     const int n_tile = i8_sve_n_tile();
     const int n_tiles = N_r / n_tile;
-    // Decide the microkernel path on the *requested* thread count, then clamp.
-    // The hybrid no-pack path has a single cheap fork, so it uses a lenient
-    // fork-amortisation floor (64Ki) that lets small shapes scale to full width
-    // on few-core machines; the packed path keeps the 512Ki default that
-    // protects high-core-count (80c) boxes from over-subscription collapse.
-    int req = num_threads <= 0 ? omp_get_max_threads() : num_threads;
+    // Resolve the requested thread count: num_threads<=0 means "auto" (all
+    // cores, or the recommended knee when I8_SVE_AUTO_THREADS=1).
+    int req = num_threads > 0 ? num_threads : omp_get_max_threads();
     if (req <= 0) req = 1;
-    // Opt-in auto-thread (knee) selection: only when the caller asks for auto
-    // (num_threads<=0) AND I8_SVE_AUTO_THREADS=1. Leaves the validated
-    // explicit-thread path untouched.
     if (num_threads <= 0) {
         const char *at = getenv("I8_SVE_AUTO_THREADS");
         if (at && atoi(at) != 0)
             req = i8gemm_recommend_threads(M, K_r, N_r, req);
     }
+    // Choose the microkernel path on the resolved count, then apply the
+    // fork-amortisation clamp. The hybrid no-pack path has a single cheap fork,
+    // so it uses a lenient floor (64Ki) that lets small shapes scale to full
+    // width on few-core machines; the packed path keeps the 512Ki default that
+    // protects high-core-count (80c) boxes from over-subscription collapse.
     const int hybrid = i8_use_hybrid_for_shape(M, K_r, N_r, req);
-    num_threads = i8_sve_effective_threads(num_threads <= 0 ? req : num_threads,
-                                           M, K_r, n_tiles,
+    num_threads = i8_sve_effective_threads(req, M, K_r, n_tiles,
                                            hybrid ? (64L << 10) : -1);
 
     if (hybrid) {

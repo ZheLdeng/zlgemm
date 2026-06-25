@@ -218,41 +218,7 @@
 	mov z31.s, #0
 	.endm
 
-	.macro ZERO_ACC_N3
-	mov z8.s, #0
-	mov z9.s, #0
-	mov z10.s, #0
-	mov z11.s, #0
-	mov z12.s, #0
-	mov z13.s, #0
-	mov z14.s, #0
-	mov z15.s, #0
-	mov z16.s, #0
-	mov z17.s, #0
-	mov z18.s, #0
-	mov z19.s, #0
-	mov z20.s, #0
-	mov z21.s, #0
-	mov z22.s, #0
-	mov z23.s, #0
-	mov z24.s, #0
-	mov z25.s, #0
-	mov z26.s, #0
-	mov z27.s, #0
-	mov z28.s, #0
-	mov z29.s, #0
-	mov z30.s, #0
-	mov z31.s, #0
-	.endm
 
-	.macro MMLA_ROW_N3 areg, c0, c1, c2, c3, c4, c5
-	smmla \c0\().s, \areg\().b, z2.b
-	smmla \c1\().s, \areg\().b, z3.b
-	smmla \c2\().s, \areg\().b, z4.b
-	smmla \c3\().s, \areg\().b, z5.b
-	smmla \c4\().s, \areg\().b, z6.b
-	smmla \c5\().s, \areg\().b, z7.b
-	.endm
 
 	.macro MMLA_M12_4A
 	smmla z8.s,  z0.b, z4.b
@@ -385,33 +351,6 @@
 	add z3.s, z3.s, #6
 	.endm
 
-	.macro BUILD_I32_STORE_OFFSETS_N3
-	index z0.s, #0, #1
-	lsr z0.s, z0.s, #2
-	mov z1.d, z0.d
-	lsl z0.s, z0.s, #3
-	lsl z1.s, z1.s, #2
-	add z0.s, z0.s, z1.s
-	index z1.s, #0, #1
-	and z1.s, z1.s, #1
-	add z0.s, z0.s, z1.s
-	index z1.s, #0, #1
-	and z1.s, z1.s, #2
-	lsr z1.s, z1.s, #1
-	dup z2.s, w12
-	mul z1.s, p1/m, z1.s, z2.s
-	add z0.s, z0.s, z1.s
-	mov z1.d, z0.d
-	add z1.s, z1.s, #2
-	mov z2.d, z0.d
-	add z2.s, z2.s, #4
-	mov z3.d, z0.d
-	add z3.s, z3.s, #6
-	mov z4.d, z0.d
-	add z4.s, z4.s, #8
-	mov z5.d, z0.d
-	add z5.s, z5.s, #10
-	.endm
 
 	// Build column offsets used by f32 stores once per N tile.
 	// z8-z11: C offsets for cp0..cp3, z12-z15: bias offsets for cp0..cp3.
@@ -656,114 +595,7 @@
 	msub x18, x4, x12, x18
 	.endm
 
-	.macro STORE_ROW_I32_N3 rp, a0, a1, a2, a3, a4, a5
-	mov x4, #(\rp * 8)
-	madd x18, x4, x12, x18
-	cmp x3, #(\rp * 2)
-	b.le .L_store_i32_n3_row_\rp\()_done
-	cmp x3, #(\rp * 2 + 1)
-	b.le .L_store_i32_n3_row_\rp\()_one
-	st1w \a0\().s, p1, [x18, z0.s, sxtw #2]
-	st1w \a1\().s, p1, [x18, z1.s, sxtw #2]
-	st1w \a2\().s, p1, [x18, z2.s, sxtw #2]
-	st1w \a3\().s, p1, [x18, z3.s, sxtw #2]
-	st1w \a4\().s, p1, [x18, z4.s, sxtw #2]
-	st1w \a5\().s, p1, [x18, z5.s, sxtw #2]
-	b .L_store_i32_n3_row_\rp\()_done
-.L_store_i32_n3_row_\rp\()_one:
-	st1w \a0\().s, p4, [x18, z0.s, sxtw #2]
-	st1w \a1\().s, p4, [x18, z1.s, sxtw #2]
-	st1w \a2\().s, p4, [x18, z2.s, sxtw #2]
-	st1w \a3\().s, p4, [x18, z3.s, sxtw #2]
-	st1w \a4\().s, p4, [x18, z4.s, sxtw #2]
-	st1w \a5\().s, p4, [x18, z5.s, sxtw #2]
-.L_store_i32_n3_row_\rp\()_done:
-	mov x4, #(\rp * 8)
-	msub x18, x4, x12, x18
-	.endm
 
-	.global i8gemm_k_nld_n3
-	.type i8gemm_k_nld_n3, %function
-i8gemm_k_nld_n3:
-	SAVE_REGS
-	mov x19, x3               // packed-A base
-
-	ldr w8, [x4, #0]          // M
-	ldr w9, [x4, #4]          // K
-	ldr w10, [x4, #8]         // N
-	ldr w12, [x4, #20]        // ldc
-
-	ptrue p0.b
-	ptrue p1.s
-	index z0.s, #0, #1
-	and z0.s, z0.s, #2
-	cmpeq p4.s, p1/z, z0.s, #0
-
-	cntw x13
-	mov x4, #3
-	mul x13, x13, x4         // n_tile = 3 * VL(int32)
-	mul x14, x9, x13         // packed-B N-tile stride in bytes
-
-	mov x15, #0              // m0
-.L_n3_m_loop:
-	cmp x15, x8
-	b.ge .L_n3_done
-	sub x3, x8, x15
-	cmp x3, #8
-	mov x18, #8
-	csel x3, x3, x18, le     // m_now = min(M - m0, 8)
-
-	mov x16, #0              // n0
-	mov x17, x1              // current B tile
-.L_n3_n_loop:
-	ZERO_ACC_N3
-	mov x4, x9
-	mov x6, x17
-	lsr x20, x15, #3
-	mul x20, x20, x9
-	add x20, x19, x20, lsl #3
-
-.L_n3_k_loop:
-	ld1b z2.b, p0/z, [x6]
-	ld1b z3.b, p0/z, [x6, #1, mul vl]
-	ld1b z4.b, p0/z, [x6, #2, mul vl]
-	ld1b z5.b, p0/z, [x6, #3, mul vl]
-	ld1b z6.b, p0/z, [x6, #4, mul vl]
-	ld1b z7.b, p0/z, [x6, #5, mul vl]
-	addvl x6, x6, #6
-
-	ld1rqb z0.b, p0/z, [x20]
-	MMLA_ROW_N3 z0, z8, z9, z10, z11, z12, z13
-	ld1rqb z0.b, p0/z, [x20, #16]
-	MMLA_ROW_N3 z0, z14, z15, z16, z17, z18, z19
-	ld1rqb z0.b, p0/z, [x20, #32]
-	MMLA_ROW_N3 z0, z20, z21, z22, z23, z24, z25
-	ld1rqb z0.b, p0/z, [x20, #48]
-	MMLA_ROW_N3 z0, z26, z27, z28, z29, z30, z31
-	add x20, x20, #64
-	subs x4, x4, #8
-	b.gt .L_n3_k_loop
-
-	BUILD_I32_STORE_OFFSETS_N3
-	madd x18, x15, x12, x16
-	add x18, x2, x18, lsl #2
-	STORE_ROW_I32_N3 0, z8, z9, z10, z11, z12, z13
-	STORE_ROW_I32_N3 1, z14, z15, z16, z17, z18, z19
-	STORE_ROW_I32_N3 2, z20, z21, z22, z23, z24, z25
-	STORE_ROW_I32_N3 3, z26, z27, z28, z29, z30, z31
-
-	add x16, x16, x13
-	add x17, x17, x14
-	cmp x16, x10
-	b.lt .L_n3_n_loop
-
-	add x15, x15, #8
-	b .L_n3_m_loop
-
-.L_n3_done:
-	RESTORE_REGS
-	ret
-	.size i8gemm_k_nld_n3, .-i8gemm_k_nld_n3
 
 	.global i8gemm_k_nld_m12
 	.type i8gemm_k_nld_m12, %function
