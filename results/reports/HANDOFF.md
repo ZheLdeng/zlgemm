@@ -149,8 +149,8 @@ make -C tests test-sve # SVE 正确性：应输出 "SVE correctness OK: 6000 wra
      - 即**本仓库的 SVE 预排内核比 NEON 预排内核高 ~11pp**。8×8 NEON 理论上是 compute-bound
        （K16 内 32 smmla / 16 ldr-q，加载不该是瓶颈），实测只有 78%，差距来自循环/累加器调度，
        而非加载吞吐。结论：**load 吞吐的劣势并未让 SVE 落后；反而 SVE 12×16 更宽的 tile 摊薄了开销。**
-     - 旧 `neon_ceiling.c` 调 `i8gemm_k_ld`（每次内部重排 A）测得 30–63% 是被 A-pack 拖累的伪低值，
-       已被 `neon_reo_ceiling.c`（调 `reo_ld`）取代。探针二进制见 §7。
+     - 旧 `neon_ceiling.c` 探针（调 `i8gemm_k_ld`，每次内部重排 A）测得 30–63% 是被 A-pack 拖累的
+       伪低值，已被 `neon_reo_ceiling.c`（调 `reo_ld`）取代（旧探针已删）。探针二进制见 §7。
 3. 多线程中等形状之前扩展差的根因 = packed 路径的**独立 A-pack OpenMP 区**的 fork 开销；
    改走 hybrid（单 region、无 pack）后大幅改善。
 
@@ -176,7 +176,8 @@ make -C tests test-sve # SVE 正确性：应输出 "SVE correctness OK: 6000 wra
    （bug 修复 / 反交织 / 缓存 scratch / hybrid+路由 / 预取）。
 
 ## 7. 有用的文件/探针
-- 主报告（详尽，按时间顺序记录每步实验）：`results/reports/three_lib_and_utilization_analysis.md`。
+- 主报告（详尽，按时间顺序记录每步实验 + step-by-step 优化历程）：
+  `results/reports/gap_and_plan_2026-06-25.md`（附录 A 整合了已删除旧报告的对比数据）。
 - 三方对比 CSV：`results/m8/three_lib_compare_session.csv`。
 - 对比脚本：`tests/run_small_grid.py`（square/ksmall/msmall/nsmall 形状集，调三方 bench）。
 - 微基准（`tests/experimental/`）：
@@ -184,14 +185,12 @@ make -C tests test-sve # SVE 正确性：应输出 "SVE correctness OK: 6000 wra
   - `prepacked_ceiling.c` —— 预排 in-L1 kernel 上限（i8 k_nld/m12、bf16 m12）。
   - `ldcost.{c,S}` —— `ld1rqb`/`ld1b`/`ldr q` 吞吐对比（→ 2/2/3 per cycle）。
   - `store_cost.{c,S}` —— scatter vs 连续 st1w（→ scatter 慢 7.2×）。
-  - `opt_kernel.{S,_bench.c}` —— K16 展开实验（隔离 91%，未采用）。
   - `verify_m12.c` / `verify_hybrid.c` —— 正确性对拍。
   - `repro96.c` —— 96³ 越界复现（guard page，已修）。
   - `neon_reo_ceiling.c` —— ✅ NEON 预排上限探针（调 `i8gemm_k_reo_ld`，cached path）→ **78.4%**。
     链接：`cc -O3 -mcpu=native -fopenmp -Ilib neon_reo_ceiling.c <i8gemm_k.o> <pack_a.o> <shim:i8_pack_B> -lm`
     （不能直接链 libi8gemm_sve.a：i8gemm_k.S 与 i8gemm_sve.S 的 i8gemm_k_ld* 符号重名）。
   - `sve_m12_ceiling.c` —— ✅ SVE 预排上限探针（调 `i8gemm_k_nld_m12`）→ **89.7%**。链 libi8gemm_sve.a 即可。
-  - `neon_ceiling.c` —— 旧探针（调会重排 A 的 k_ld，伪低值 30–63%，已被 neon_reo_ceiling.c 取代）。
   - 结果汇总：`results/m8/prepacked_ceiling_neon_vs_sve.csv`。
 - 关键结果 CSV（2026-06-23）：
   - `results/m8/prepacked_ceiling_neon_vs_sve.csv` —— NEON vs SVE 预排上限（78.4% vs 89.7%）。

@@ -41,3 +41,6 @@ i8gemm_k_ld.o
 bench_ld_cmp
 bench_stride_cmp
 bf16gemm_mt
+
+# experimental build artifacts
+tests/experimental/build/

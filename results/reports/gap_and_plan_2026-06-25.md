@@ -81,3 +81,73 @@ The only remaining lever is a **wider (4VL) i8 microkernel**. Caveats before inv
   (gap #1, msplit split-K) are hardware-portable; the microkernel-width gap is not.
 Suggest validating the bottleneck on Huawei (perf: smmla issue rate vs stall_backend on a
 128^3 single-thread run) before building a 4VL kernel.
+
+---
+
+# 附录 A — i8 SVE 优化历程（step-by-step，整合自已删除的旧报告）
+
+> 本附录把 2026-06-08…06-24 多份中间报告里**有对比性的 before/after 数据**整合到一处，
+> 以体现逐步优化效果，原始中间报告与中间 probe CSV 已删除（数据可由本表追溯）。
+> 平台：Neoverse-V1 8c，单核峰值 i8 661 GOPS / bf16 331 GFLOPS（2-op 口径）。
+
+## A.1 i8 SVE 优化时间线（每步 before→after，均 bit-exact、无回退）
+
+| # | 优化 | 代表形状 | before | after | 收益 |
+|---|---|---|---|---|---|
+| 1 | **修正 96³ 崩溃 + m12 i32 数值 bug**（`BUILD_I32_OFFSET_BASE` scratch z0→z2）| M≥12,K≥64,n_tiles>1 | 崩溃/结果错 | 正确 | 正确性（之前静默错误）|
+| 2 | **存储反交织**（scatter st1w 实测比连续慢 7.2×；trn1/trn2+ext）| 256×16×256 t1 | 64 | 131 | +106% |
+| | | 128³ t1 | 258 | 333 | +29% |
+| | | 256³ t1 | 373 | 454 | +22% |
+| | | 512³ t1 | 482 | 526 | +9% |
+| | | 2048×4096×8192 t8 | 2727 | 2842 | +4% |
+| 3 | **线程本地缓存 A-pool**（去掉每次调用 malloc/free）| 小形状 | — | — | 去 per-call 开销 |
+| 4 | **hybrid 免 pack 微内核**（小形状直读 A）| 64³ t1 | 139 | 276 | +99% |
+| | | 64³ t8 | 92 | 360 | +289% |
+| | | 64×128×64 t8 | 172 | 602 | +250% |
+| 5 | **线程感知 hybrid 路由**（多线程中等形状）| 96³ t8 | 386 | 771 | 超 ACL 669 |
+| | | 128³ t8 | 525 | 1236 | 超 ACL 956 |
+| 6 | **大 N 偏斜放开 N 限制**（nt≥2）| 64×64×512 t8 | 446 | 1110 | 超 ACL 1058 |
+| 7 | **中等立方体 2D 自适应分发 @8**（vs ACL 比值）| 160³/192³/200³/224³/256³ | .86/.94/.80/.82/.84 | .99/.98/.95/.94/.89 | — |
+| 8 | **(06-25) 小 M hybrid 路由 + 路径相关 clamp** | 8×512×512 t8 | 0.57×ACL(624) | 1.21×ACL(1344) | 修复最差点 |
+| | | 8×512×512 t4 | 0.68× | 0.94× | |
+| 9 | **(06-25) msplit lib（split-K）** | 8×2048×2048 t8 | 545(朴素M-split) | 1430(split-K) | 2.62× |
+
+## A.2 单核利用率天花板（硬件事实，durable）
+| 场景 | i8 | bf16 |
+|---|---|---|
+| 纯 compute（操作数常驻、无 load）| 663 GOPS = **100%** | 332 = 100% |
+| 预排 + L1 常驻、仅 kernel、m12 tile | 554 = **83.8%** | 286 = 86.5% |
+| 16 smmla + 8 loads（intensity 2.0）微环 | **92.3%** | — |
+| 完整 dispatch 单线程大形状 | 554 = 83.8% | 278 = 84% |
+
+**结论**：32 个 z 寄存器下最大可用 tile 6×4（24 累加器）→ 2.4 mmla/load，预排 kernel 上限约 **87%**
+（已基本吃满），**V1 上 95% 不可达**；compute 不是杠杆。NEON 预排上限（reo_ld 8×8）实测仅 78.4%
+< SVE m12 89.7%，故"SVE 应改走 NEON"假设被推翻（V1 上 SVE 微内核更优）。
+
+## A.3 三方单核对比 digest（480 形状，threads=1，three_lib_grid_full_reps1）
+中位（GOPS）：i8 — SVE 318.8 / NEON 266.5 / **ACL 429.0** / KleidiAI 339.4；
+bf16 — SVE 204.8 / **ACL 220.2** / KleidiAI 203.0。
+按 cache 分层：ACL 在 L2/H2 中小规模强（kernel selector + hybrid 6x4VL）；SVE 在 GT_L2 大规模
+追平/超 ACL（i8 GT_L2: SVE 416.6 ≈ ACL 466.2；bf16 GT_L2: SVE 235.6 > ACL 232.1）；KleidiAI 在
+L1 短路径强但输出是 f32 dequant（非同口径）。**bf16 多线程 i8gemm 在所有点领先 ACL 和 KleidiAI。**
+
+## A.4 尾块（tail）durable 结论
+尾块 +4 ≈ 填满半个 M8 block，普遍 ≥99%；痛点是 task 粒度不均：**SVE 痛在低线程**（512×4096×1024
+@t8 +1 = 79.8%），**NEON 痛在中线程**（@t16/t32 ~78–92%）；≥10 线程或 +4 偏移基本无损。
+建议：低线程 + 小 tail（+1/+2）把尾块并入最后一个 M8 block（padding）而非单独平铺切分。
+
+## A.5 80 核 compute-only 线性度（华为机器，详见 huawei_80c 交接）
+SVE i8 `compute_only` 到 64 核近线性（~11451 GOPS，效率~1.0），80 核回落到 0.58；NEON i8 在
+64/80 核扩展崩塌（0.47/0.19）。→ 硬件到 64 核近线性，掉速是 kernel 调度问题（已在 huawei 交接处理）。
+
+## A.6 其它 durable 对比（整合自 80c lite / kleidiai 实验，原报告已删）
+- **80c split 敏感性（NEON）**：`512×4096×1024` 一类在高线程下 full/compute 天花板偏低（8T~54%），
+  改 **m-split** 避免在线 A 重复 pack 后能逼近天花板，实测最大提升 **2.7×@32T**（NEON I8）、
+  1.7–2.7×（NEON BF16）。→ auto 已加入"大 M/K 偏向 m-split"规则。SVE I8 full 利用率稳定 45–52%
+  （compute-only 峰值高，更早进入 load/store 受限）。
+- **NEON m16n4 实验路径**（`i8gemm_mt_dispatch_m16n4`，packed-A 复用 + K32 双缓冲）：GT_L2 中位
+  逐版提升 `1c 170→245.7, 2c 311→402.7, 4c 537→666.2, 8c 790→885.2`，但仍 < KleidiAI（手写 asm +
+  N4 专用 pack）且 < 默认 8×8（宽 N 大矩阵）。结论：m16n4 仅适合**窄 N / 小 M tail / 多线程 work 不足**
+  场景，宽 N 大矩阵继续用 8×8；未纳入默认 selector。
+- **NEON compute-only 异常**：≥4 核 NEON I8 compute-only 仅 ~67%/core（参考应 ~100%），疑似绑定/频率
+  策略；若修复 full 路径绝对性能会同步提升（待查，低优先级）。
