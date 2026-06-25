@@ -18,6 +18,13 @@ SVE_KERNELS := \
 	$(LIB_DIR)/i8gemm_sve.S \
 	$(LIB_DIR)/i8gemm_hybrid.S \
 	$(LIB_DIR)/i8gemm_pack_a_neon.S
+MSPLIT_KERNELS := \
+	$(LIB_DIR)/i8gemm_msplit.c \
+	$(LIB_DIR)/i8gemm_msplit_k.S \
+	$(LIB_DIR)/i8gemm_sve.c \
+	$(LIB_DIR)/i8gemm_sve.S \
+	$(LIB_DIR)/i8gemm_hybrid.S \
+	$(LIB_DIR)/i8gemm_pack_a_neon.S
 NEON_KERNELS := \
 	$(LIB_DIR)/bf16gemm_mt.c \
 	$(LIB_DIR)/bf16gemm_k.S \
@@ -27,7 +34,7 @@ NEON_KERNELS := \
 	$(LIB_DIR)/i8gemm_k_bias.S \
 	$(LIB_DIR)/i8gemm_pack_a_neon.S
 
-.PHONY: all test test-sve test-neon bench-sve bench-neon bench-nld-sve bench-tp m8-interfaces clean
+.PHONY: all test test-sve test-neon test-msplit bench-sve bench-neon bench-nld-sve bench-tp bench-msplit m8-interfaces clean
 
 all: $(BUILD_DIR)/test_correctness_sve $(BUILD_DIR)/bench_perf_sve $(BUILD_DIR)/test_correctness $(BUILD_DIR)/bench_perf
 
@@ -65,6 +72,18 @@ test-sve: $(BUILD_DIR)/test_correctness_sve
 
 test-neon: $(BUILD_DIR)/test_correctness
 	$<
+
+$(BUILD_DIR)/test_msplit_correctness: test_msplit_correctness.c $(MSPLIT_KERNELS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ test_msplit_correctness.c $(MSPLIT_KERNELS) $(LDLIBS)
+
+$(BUILD_DIR)/bench_msplit: bench_msplit.c $(MSPLIT_KERNELS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ bench_msplit.c $(MSPLIT_KERNELS) $(LDLIBS)
+
+test-msplit: $(BUILD_DIR)/test_msplit_correctness
+	$<
+
+bench-msplit: $(BUILD_DIR)/bench_msplit
+	$< 16 512 512 50 2 4 8
 
 bench-sve: $(BUILD_DIR)/bench_perf_sve
 	$< shape.csv
