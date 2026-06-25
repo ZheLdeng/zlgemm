@@ -169,3 +169,24 @@ SVE i8 `compute_only` 到 64 核近线性（~11451 GOPS，效率~1.0），80 核
 2. 小 K / 中 K 路由到 hybrid 免 pack（K128~64% K256~78% 的 A-pack 开销）。
 3. 窄 N / 非 16 对齐（N=17 pad 到 32 的悬崖）。
 4. decode M=1–4 GEMV 路径（8 行 smmla tile 结构浪费，需 sdot/dot kernel）。
+
+
+---
+
+# 附录 C — 四项优化最终结论（数据驱动，2026-06-25）
+
+华为实测（bw_probe / gemv_clamp）后，关键结论：**微内核在好区间已 84–96%，剩余弱点全是调度，无需写新微内核。**
+
+| # | 方案 | 结论 | 落地 |
+|---|---|---|---|
+| 1 | 线程拐点 | ✅ `i8gemm_recommend_threads` advisory（opt-in，`I8_SVE_AUTO_THREADS=1`），floor `I8_REC_MACS` 按 fine_sweep knee 校准 | commit 85588ae |
+| 2 | 小K→hybrid | ❌ 实测回退（packed 对 K≥64 全 M 更优）；小K低util是结构性短K流水线，走 #1 | 不做（数据） |
+| 3 | 窄N内核 | ❌ 单核已~84%，非内核问题；多线程低util=M-split 重复 streaming B（cache-blocking），同中cube | 不做内核；属调度 |
+| 4 | GEMV内核 | ❌ 不写内核（M=1 内存受限，DRAM≥766GB/s，smmla 浪费被内存墙掩盖）；✅ 改为**路由 M≤4 到 hybrid**（华为 1.2–1.6×） | commit a71e36d |
+
+华为 gemv_clamp 实测：1×4096×1024 default 266→hybrid 437；1×4096×4096 780→1164；1×11008×4096 1245→1610；1×4096×11008 1300→1541。
+
+**真正剩余的硬骨头（均为调度/带宽，非微内核）**：
+- (a) 中等形状过度并行：#1 advisory 已给，默认全自动需华为带宽/LLC 模型（单一 floor 区分不了"带宽饱和中等形状"vs"可在N上扩展的小B形状"）。
+- (b) 窄N + 大M + 大K 的 B 重复 streaming：需 ACL 式 2D/K cache-blocking（大工程）。
+- 微内核本身（compute）已非瓶颈。
