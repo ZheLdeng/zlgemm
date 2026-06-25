@@ -842,7 +842,18 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
     size_t restream_bytes = (size_t)per_thread_blocks * (size_t)K_r * (size_t)N_r;
     int grid_worth = (nb_rows < num_threads) ||
                      (restream_bytes >= (256u << 10));
-    if (pack2d && num_threads > 1 && use_a_reorder && n_tiles >= 2 &&
+    /*
+     * Narrow-N guard. The 2D grid's only benefit is cutting B re-streaming by
+     * N-banding, which needs enough N-tiles to band. With few n_tiles the picker
+     * is forced into a tall pm x small-pn grid that bands N into thin column
+     * strips and load-imbalances the row dimension -- measured on Huawei 80c this
+     * is a large LOSS for narrow N (2048x4096x64 @t48: grid 4573 vs M-split 9024,
+     * +97%; 2048x16384x24 @t64: 3153 vs 5649, +79%). Require n_tiles >= 8 so the
+     * grid only runs where N-banding actually pays; narrow N falls back to the
+     * pure M-split, which streams B from L2 per row-band and wins. (t79 rescue
+     * shapes have large N -> n_tiles >= 64, unaffected.)
+     */
+    if (pack2d && num_threads > 1 && use_a_reorder && n_tiles >= 8 &&
         !use_n_split && grid_worth)
         i8_pick_grid(nb_rows, n_tiles, num_threads, M, N_r, &gpm, &gpn);
 
