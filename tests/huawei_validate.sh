@@ -36,9 +36,25 @@ echo; echo "== [1/4] build lib + bench =="
 make -C "$LIB" sve >/dev/null 2>&1 || { echo "LIB BUILD FAILED"; exit 1; }
 if [ ! -x "$B" ] || [ "${FORCE_BUILD:-0}" = 1 ]; then
   echo "  compiling $B ..."
+  # The experimental NEON-i8mm m16n4 path (i8gemm_m16n4.{c,S}) is irrelevant to
+  # scheduling validation and its AdvSIMD `smmla v.4s,v.16b` needs the i8mm
+  # feature enabled for C intrinsics (which `-mcpu=native` may not turn on for
+  # AdvSIMD on every toolchain). bench_dispatch_types.c only *references* the
+  # symbol i8gemm_mt_dispatch_m16n4, so we satisfy it with a tiny stub and skip
+  # compiling the NEON-i8mm code entirely -> builds wherever `make sve` does.
+  STUB=build/_m16n4_stub.c
+  cat > "$STUB" <<'EOF'
+#include <stdint.h>
+void i8gemm_mt_dispatch(const int8_t*, const int8_t*, int32_t*, int, int, int, int);
+/* Never called in validation (impl != "m16n4"); forward to the SVE dispatch. */
+void i8gemm_mt_dispatch_m16n4(const int8_t* A, const int8_t* B, int32_t* C,
+                              int M, int K, int N, int t) {
+    i8gemm_mt_dispatch(A, B, C, M, K, N, t);
+}
+EOF
   cc -O3 -Wall -fopenmp -mcpu=native -I"$LIB" -DBENCH_SVE -o "$B" \
-    bench_dispatch_types.c $LIB/bf16gemm_sve.c $LIB/bf16gemm_sve.S $LIB/i8gemm_sve.c \
-    $LIB/i8gemm_m16n4.c $LIB/i8gemm_m16n4.S $LIB/i8gemm_sve.S $LIB/i8gemm_hybrid.S \
+    bench_dispatch_types.c "$STUB" $LIB/bf16gemm_sve.c $LIB/bf16gemm_sve.S \
+    $LIB/i8gemm_sve.c $LIB/i8gemm_sve.S $LIB/i8gemm_hybrid.S \
     $LIB/i8gemm_pack_a_neon.S -lm || { echo "BENCH BUILD FAILED"; exit 1; }
 fi
 echo "  ok."
