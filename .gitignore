@@ -44,3 +44,6 @@ bf16gemm_mt
 
 # experimental build artifacts
 tests/experimental/build/
+
+# python cache
+tests/__pycache__/

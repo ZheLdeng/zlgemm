@@ -32,19 +32,12 @@ echo "#  CORES=$CORES THREADS='$THREADS' RUNS=$RUNS PEAK=$PEAK GOPS/core"
 echo "#  sizes: small=$SMALL med=$MED large=$LARGE   nproc=$NPROC"
 echo "############################################################"
 
-# ---- build (stub out the experimental NEON-i8mm m16n4 path) ----
+# ---- build ----
 make -C "$LIB" sve >/dev/null 2>&1 || { echo "LIB BUILD FAILED"; exit 1; }
 if [ ! -x "$B" ] || [ "${FORCE_BUILD:-0}" = 1 ]; then
   mkdir -p build
-  STUB=build/_m16n4_stub.c
-  cat > "$STUB" <<'EOF'
-#include <stdint.h>
-void i8gemm_mt_dispatch(const int8_t*, const int8_t*, int32_t*, int, int, int, int);
-void i8gemm_mt_dispatch_m16n4(const int8_t* A, const int8_t* B, int32_t* C,
-                              int M, int K, int N, int t){ i8gemm_mt_dispatch(A,B,C,M,K,N,t); }
-EOF
   cc -O3 -Wall -fopenmp -mcpu=native -I"$LIB" -DBENCH_SVE -o "$B" \
-    bench_dispatch_types.c "$STUB" $LIB/bf16gemm_sve.c $LIB/bf16gemm_sve.S \
+    bench_dispatch_types.c $LIB/bf16gemm_sve.c $LIB/bf16gemm_sve.S \
     $LIB/i8gemm_sve.c $LIB/i8gemm_sve.S $LIB/i8gemm_hybrid.S \
     $LIB/i8gemm_pack_a_neon.S -lm || { echo "BENCH BUILD FAILED"; exit 1; }
 fi

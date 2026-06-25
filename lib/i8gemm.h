@@ -60,17 +60,13 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
 
 // Advisory: recommended thread count ("knee") for a shape on this machine.
 // Returns the fewest threads expected to reach near-peak GOPS, bounded by the
-// work-unit count and a per-thread MAC floor (env I8_REC_MACS, default 4Mi).
-// ADVISORY ONLY: the floor is hardware-dependent; calibrate against a sweep.
-// i8gemm_mt_dispatch uses it only when called with nthreads<=0 AND env
-// I8_SVE_AUTO_THREADS=1; otherwise the explicit thread count is honoured.
+// work-unit count and (for bandwidth-bound large-B shapes) a per-thread MAC
+// floor (env I8_REC_MACS, default 512Ki; only applied when K_r*N_r exceeds
+// I8_REC_CACHE, default 2Mi). ADVISORY ONLY: the floors are hardware-dependent;
+// calibrate against a sweep. i8gemm_mt_dispatch uses it only when called with
+// nthreads<=0 AND env I8_SVE_AUTO_THREADS=1; otherwise the explicit thread
+// count is honoured.
 int i8gemm_recommend_threads(int M, int K_r, int N_r, int max_threads);
-
-// Experimental NEON I8MM 16x4 dispatch.
-// Uses the same B_reo layout as i8_pack_B and writes int32 row-major C.
-void i8gemm_mt_dispatch_m16n4(const i8_t *A, const i8_t *B_reo,
-                              i32_t *C, int M, int K_r, int N_r,
-                              int nthreads);
 
 // fp32 output (int32 accumulator → scvtf on store)
 void i8gemm_mt_dispatch_f(const i8_t *A, const i8_t *B_reo,

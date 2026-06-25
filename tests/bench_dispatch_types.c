@@ -202,16 +202,10 @@ static double bench_i8_one(const char *impl, int M, int K, int N, int reps, int 
                          (size_t)K_r * (size_t)N_r +
                          (size_t)M * (size_t)N_r * sizeof(i32_t))) / 1024.0;
 
-    const int use_m16n4 = strstr(impl, "m16n4") != NULL;
-
     for (int w = 0; w < warmup; w++)
         for (int b = 0; b < batch_count; b++)
-            if (use_m16n4)
-                i8gemm_mt_dispatch_m16n4(A_pad[b], B_reo[b], C[b], M, K_r,
-                                         N_r, threads);
-            else
-                i8gemm_mt_dispatch(A_pad[b], B_reo[b], C[b], M, K_r, N_r,
-                                   threads);
+            i8gemm_mt_dispatch(A_pad[b], B_reo[b], C[b], M, K_r, N_r,
+                               threads);
 
     double best = 0.0;
     const double ops = 2.0 * (double)M * (double)K * (double)N *
@@ -220,12 +214,8 @@ static double bench_i8_one(const char *impl, int M, int K, int N, int reps, int 
         double t0 = now_sec();
         for (int i = 0; i < reps; i++)
             for (int b = 0; b < batch_count; b++)
-                if (use_m16n4)
-                    i8gemm_mt_dispatch_m16n4(A_pad[b], B_reo[b], C[b], M,
-                                             K_r, N_r, threads);
-                else
-                    i8gemm_mt_dispatch(A_pad[b], B_reo[b], C[b], M, K_r,
-                                       N_r, threads);
+                i8gemm_mt_dispatch(A_pad[b], B_reo[b], C[b], M, K_r,
+                                   N_r, threads);
         double dt = (now_sec() - t0) / (double)reps;
         double gops = ops / dt / 1e9;
         if (gops > best)

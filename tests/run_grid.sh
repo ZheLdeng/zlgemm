@@ -10,7 +10,7 @@ cc -O3 -Wall -fopenmp -mcpu=native -I../lib -DBENCH_SVE=1 \
   bench_dispatch_types.c \
   ../lib/bf16gemm_sve.c ../lib/bf16gemm_sve.S \
   ../lib/i8gemm_sve.c ../lib/i8gemm_sve.S \
-  ../lib/i8gemm_m16n4.c ../lib/i8gemm_m16n4.S \
+  ../lib/i8gemm_hybrid.S \
   ../lib/i8gemm_pack_a_neon.S \
   -o build/bench_dispatch_sve -lm
 

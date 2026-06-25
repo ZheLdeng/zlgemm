@@ -67,8 +67,6 @@ def build_i8gemm() -> list[tuple[str, Path]]:
         LIB / "bf16gemm_sve.c",
         LIB / "bf16gemm_sve.S",
         LIB / "i8gemm_sve.c",
-        LIB / "i8gemm_m16n4.c",
-        LIB / "i8gemm_m16n4.S",
         LIB / "i8gemm_sve.S",
         LIB / "i8gemm_hybrid.S",
         LIB / "i8gemm_pack_a_neon.S",
@@ -79,8 +77,6 @@ def build_i8gemm() -> list[tuple[str, Path]]:
         LIB / "bf16gemm_k.S",
         LIB / "bf16gemm_k_bias.S",
         LIB / "i8gemm_mt.c",
-        LIB / "i8gemm_m16n4.c",
-        LIB / "i8gemm_m16n4.S",
         LIB / "i8gemm_k.S",
         LIB / "i8gemm_k_bias.S",
         LIB / "i8gemm_pack_a_neon.S",
@@ -89,7 +85,7 @@ def build_i8gemm() -> list[tuple[str, Path]]:
     neon = BUILD / "bench_dispatch_i8gemm_neon"
     run(common + ["-DBENCH_SVE", "-o", str(sve)] + [str(x) for x in sve_src] + ["-lm"])
     run(common + ["-o", str(neon)] + [str(x) for x in neon_src] + ["-lm"])
-    return [("i8gemm_sve", sve), ("i8gemm_neon", neon), ("i8gemm_neon_m16n4", neon)]
+    return [("i8gemm_sve", sve), ("i8gemm_neon", neon)]
 
 
 def build_acl() -> Path | None:
@@ -241,8 +237,6 @@ def main() -> None:
                 env["OMP_PROC_BIND"] = "close"
                 for lib, impl, exe in benches:
                     dtypes = ["bf16", "i8"]
-                    if impl == "i8gemm_neon_m16n4":
-                        dtypes = ["i8"]
                     for dtype in dtypes:
                         if lib == "i8gemm":
                             cmd = [
