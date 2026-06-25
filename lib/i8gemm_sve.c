@@ -379,6 +379,15 @@ static int i8_use_hybrid_for_shape(int M, int K_r, int N_r, int num_threads) {
         // unrestricted here: large-N small-M/K shapes benefit most.
         if (K_r <= 256 && M <= 256)
             return 1;
+        // Decode/GEMV (M<=4): memory-bandwidth bound. The packed path's 512Ki
+        // fork clamp starves it (1x4096x1024 pinned to ~8 threads = 266 GOPS on
+        // 80c), while the hybrid path (direct-A read, lenient 64Ki clamp) scales
+        // to the bandwidth knee. Measured on Huawei: hybrid 1.2-1.6x the packed
+        // default for M=1 across K/N (1x4096x1024 266->437, 1x4096x4096 780->1164).
+        // smmla wastes 7/8 of the tile at M=1 but that is hidden under the memory
+        // wall, so a dedicated GEMV kernel is not worth it -- routing is the lever.
+        if (M <= 4)
+            return 1;
         // Small-M, larger-K: with at most two 8-row blocks (M<=16) a pure
         // M-split cannot fill the threads and the packed path additionally pays
         // its separate A-pack fork, while the hybrid path N-splits the
