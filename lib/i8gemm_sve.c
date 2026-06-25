@@ -103,12 +103,36 @@ static void i8_pick_grid(int mblk, int ntiles, int P, long Mw, long Nw,
             best_pn = pn;
         }
     }
+    // 1D-grid rescue. When P is prime/awkward, the max-busy grid above is 1D
+    // (pm==1 or pn==1), which re-streams one operand P times -> aggregate
+    // bandwidth collapse (measured on Huawei: 2048x4096x2048 @t79 fell to 42%
+    // of the compute ceiling because 79x1 re-reads B 79x). If a genuine 2D grid
+    // exists that keeps >=7/8 of the threads busy, switch to the lowest-traffic
+    // one. Factorable P (8/64/80 -> already 2D) is untouched: zero regression.
+    if ((best_pm == 1 || best_pn == 1) && P >= 4) {
+        long min_use = (long)P - P / 8;
+        int r_pm = 0, r_pn = 0;
+        double r_cost = 1e300;
+        long r_use = 0;
+        for (int pm = 2; pm <= pm_max; pm++) {
+            int pn = P / pm;
+            if (pn > ntiles) pn = ntiles;
+            if (pn < 2) continue;                 // require a real 2D grid
+            long use = (long)pm * pn;
+            if (use < min_use) continue;
+            double cost = (double)pn * (double)Mw + (double)pm * (double)Nw;
+            if (cost < r_cost || (cost == r_cost && use > r_use)) {
+                r_cost = cost; r_use = use; r_pm = pm; r_pn = pn;
+            }
+        }
+        if (r_pn) { best_pm = r_pm; best_pn = r_pn; }
+    }
     *out_pm = best_pm;
     *out_pn = best_pn;
 }
 
 static int i8_sve_effective_threads(int num_threads, int M, int K_r,
-                                    int n_tiles) {
+                                    int n_tiles, long min_macs_override) {
     if (num_threads <= 0)
         num_threads = omp_get_max_threads();
     if (num_threads <= 0)
@@ -135,9 +159,17 @@ static int i8_sve_effective_threads(int num_threads, int M, int K_r,
      * the gross oversubscription that collapses the same shapes at 64/80
      * threads -- e.g. 64x512x256 (8.4M macs) caps at 16, matching its measured
      * t16 peak on the 80-core machine. Set I8_SVE_MIN_MACS=0 to disable.
+     *
+     * min_macs_override (>=0) lets the caller relax this for the hybrid no-pack
+     * path, whose fork is a single cheap region (no separate A-pack team): a
+     * small shape like 8x512x512 (2.1M macs) is capped to 4 threads by the
+     * 512Ki default yet scales cleanly to 8 with the hybrid kernel. <0 uses the
+     * env / 512Ki default (packed path -- unchanged, protects the 80-core box).
      */
     const char *mm_env = getenv("I8_SVE_MIN_MACS");
-    long min_macs = mm_env ? atol(mm_env) : (512L << 10);
+    long min_macs = mm_env ? atol(mm_env)
+                           : (min_macs_override >= 0 ? min_macs_override
+                                                     : (512L << 10));
     if (min_macs > 0) {
         long total_macs = (long)M * (long)K_r *
                           (long)(n_tiles * i8_sve_n_tile());
@@ -299,7 +331,18 @@ static int i8_use_hybrid_for_shape(int M, int K_r, int N_r, int num_threads) {
         // shape with a small K and M. Large K/M keep the packed path (better
         // B reuse and contiguous packed-A loads amortize there). N is
         // unrestricted here: large-N small-M/K shapes benefit most.
-        return K_r <= 256 && M <= 256;
+        if (K_r <= 256 && M <= 256)
+            return 1;
+        // Small-M, larger-K: with at most two 8-row blocks (M<=16) a pure
+        // M-split cannot fill the threads and the packed path additionally pays
+        // its separate A-pack fork, while the hybrid path N-splits the
+        // (L1-resident) B panel across all threads with one cheap fork.
+        // Measured on V1: 8x512x512 @t8 624 -> ~1344 (vs ACL 1147), 16x512x512
+        // @t8 1118 -> 1571. M>=24 is left to the packed path: its 2D grid +
+        // m12 kernel (24 = 2x12) fill the threads and win there.
+        if (M <= 16 && K_r <= 1024)
+            return 1;
+        return 0;
     }
     // Single thread: hybrid only helps the tiniest shapes (no pack pass to
     // amortize); for larger N the packed path's contiguous A wins.
@@ -521,9 +564,18 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
                         int num_threads) {
     const int n_tile = i8_sve_n_tile();
     const int n_tiles = N_r / n_tile;
-    num_threads = i8_sve_effective_threads(num_threads, M, K_r, n_tiles);
+    // Decide the microkernel path on the *requested* thread count, then clamp.
+    // The hybrid no-pack path has a single cheap fork, so it uses a lenient
+    // fork-amortisation floor (64Ki) that lets small shapes scale to full width
+    // on few-core machines; the packed path keeps the 512Ki default that
+    // protects high-core-count (80c) boxes from over-subscription collapse.
+    int req = num_threads <= 0 ? omp_get_max_threads() : num_threads;
+    if (req <= 0) req = 1;
+    const int hybrid = i8_use_hybrid_for_shape(M, K_r, N_r, req);
+    num_threads = i8_sve_effective_threads(num_threads, M, K_r, n_tiles,
+                                           hybrid ? (64L << 10) : -1);
 
-    if (i8_use_hybrid_for_shape(M, K_r, N_r, num_threads)) {
+    if (hybrid) {
         if (num_threads <= 1) {
             gemm_params_t p = {M, K_r, N_r, K_r, K_r, N_r};
             i8gemm_k_hybrid(A, B_reo, C, NULL, &p);
@@ -830,7 +882,7 @@ void i8gemm_mt_dispatch_f(const i8_t *A, const i8_t *B_reo,
                           int num_threads) {
     const int n_tile = i8_sve_n_tile();
     const int n_tiles = N_r / n_tile;
-    num_threads = i8_sve_effective_threads(num_threads, M, K_r, n_tiles);
+    num_threads = i8_sve_effective_threads(num_threads, M, K_r, n_tiles, -1);
     const int use_n_split =
         i8_sve_use_n_split(M, K_r, N_r, n_tiles, num_threads);
     const int use_a_reorder = i8_use_a_reorder_for_shape(K_r, n_tiles);
@@ -867,7 +919,7 @@ void i8gemm_mt_dispatch_bias_f(const i8_t *A, const i8_t *B_reo,
                                int num_threads, const f32_t *bias) {
     const int n_tile = i8_sve_n_tile();
     const int n_tiles = N_r / n_tile;
-    num_threads = i8_sve_effective_threads(num_threads, M, K_r, n_tiles);
+    num_threads = i8_sve_effective_threads(num_threads, M, K_r, n_tiles, -1);
     const int use_n_split =
         i8_sve_use_n_split(M, K_r, N_r, n_tiles, num_threads);
     const int use_a_reorder = i8_use_a_reorder_for_shape(K_r, n_tiles);
