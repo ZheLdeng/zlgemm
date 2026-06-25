@@ -36,6 +36,7 @@ echo; echo "== [1/4] build lib + bench =="
 make -C "$LIB" sve >/dev/null 2>&1 || { echo "LIB BUILD FAILED"; exit 1; }
 if [ ! -x "$B" ] || [ "${FORCE_BUILD:-0}" = 1 ]; then
   echo "  compiling $B ..."
+  mkdir -p build
   # The experimental NEON-i8mm m16n4 path (i8gemm_m16n4.{c,S}) is irrelevant to
   # scheduling validation and its AdvSIMD `smmla v.4s,v.16b` needs the i8mm
   # feature enabled for C intrinsics (which `-mcpu=native` may not turn on for
