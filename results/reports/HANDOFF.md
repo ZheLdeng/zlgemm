@@ -9,6 +9,14 @@
 > (−60..−89%) 已修并验证 (commit `d8dcf48`, branch `sched-linearity-opt`)；
 > 微内核 50% 计算天花板与 NEON/SVE 路由两项待续(需华为机器)。
 
+> **2026-06-25 — 小 M 多线程 + 独立 M-split lib 工作另起一份专门交接：见
+> [`smallm_msplit_handoff_2026-06-25.md`](smallm_msplit_handoff_2026-06-25.md)**（差距分析见
+> [`gap_and_plan_2026-06-25.md`](gap_and_plan_2026-06-25.md)）。内容：基于 ACL 系统对比，修复
+> 最严重差距(小 M 浅/中 K 多线程 `8×512×512 @t8` 0.57→1.21× ACL)；新建只切 M 的
+> `i8gemm_msplit` lib(小 M 用 split-K，1.5–2.6× over 朴素 M-split，7168 用例 bit-exact)；
+> 残差全部收敛到微内核宽度(8×2VL vs ACL 6×4VL)，是 V1 专属、暂停等华为验证瓶颈。
+> branch `i8-msplit-and-smallm-opt`(已 push)，commits `b326b41`/`60ba942`/`f6dc87b`。
+
 ## 0. 一句话现状
 i8gemm 的 SVE i8 路径经过本轮优化后，在**小/中/偏斜形状**上已普遍追平或超过 ACL，
 **bf16 在所有测试点领先 ACL 和 KleidiAI**；剩余差距是 **i8 中等立方体 (192–256³) 在 8 线程**
