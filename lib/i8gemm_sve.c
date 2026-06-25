@@ -190,6 +190,52 @@ static int i8_sve_effective_threads(int num_threads, int M, int K_r,
     return num_threads;
 }
 
+/*
+ * Advisory thread recommendation (the "knee"): the fewest threads that still
+ * reach near-peak GOPS for this shape. Parallelism is bounded by the work-unit
+ * count (mblk * n_tiles); beyond that, extra threads only add fork/bandwidth
+ * overhead. We also cap by a per-thread MAC floor (I8_REC_MACS, default 4Mi) so
+ * bandwidth-bound medium shapes are not over-subscribed. NOTE: this is ADVISORY
+ * and the floor is hardware-dependent -- a single floor cannot tell a
+ * bandwidth-saturated medium shape (wants few threads) from a cache-resident
+ * small-B shape that genuinely scales on N (wants many). Callers in latency
+ * mode, or with small cache-resident B, should pass their own count. Calibrate
+ * I8_REC_MACS against tests/huawei_fine_sweep.sh knees for a given machine.
+ * Does NOT change i8gemm_mt_dispatch unless the caller passes num_threads<=0 AND
+ * sets I8_SVE_AUTO_THREADS=1 (opt-in), so the validated explicit-thread path is
+ * untouched.
+ */
+int i8gemm_recommend_threads(int M, int K_r, int N_r, int max_threads) {
+    if (max_threads <= 0)
+        max_threads = omp_get_max_threads();
+    if (max_threads <= 0)
+        max_threads = 1;
+    int n_tile = i8_sve_n_tile();
+    int n_tiles = N_r / n_tile;
+    if (n_tiles < 1)
+        n_tiles = 1;
+    int mblk = (M + 7) / 8;
+    if (mblk < 1)
+        mblk = 1;
+    long units = (long)mblk * (long)n_tiles;     /* upper bound on parallelism */
+    const char *e = getenv("I8_REC_MACS");
+    long floor = e ? atol(e) : (4L << 20);        /* per-thread MAC floor */
+    long t = max_threads;
+    if (t > units)
+        t = units;
+    if (floor > 0) {
+        long macs = (long)M * (long)K_r * (long)N_r;
+        long cap = macs / floor;
+        if (cap < 1)
+            cap = 1;
+        if (t > cap)
+            t = cap;
+    }
+    if (t < 1)
+        t = 1;
+    return (int)t;
+}
+
 static int i8_sve_use_n_split(int M, int K_r, int N_r, int n_tiles,
                               int num_threads) {
     const char *split = getenv("I8_SVE_SPLIT");
@@ -571,8 +617,17 @@ void i8gemm_mt_dispatch(const i8_t *A, const i8_t *B_reo,
     // protects high-core-count (80c) boxes from over-subscription collapse.
     int req = num_threads <= 0 ? omp_get_max_threads() : num_threads;
     if (req <= 0) req = 1;
+    // Opt-in auto-thread (knee) selection: only when the caller asks for auto
+    // (num_threads<=0) AND I8_SVE_AUTO_THREADS=1. Leaves the validated
+    // explicit-thread path untouched.
+    if (num_threads <= 0) {
+        const char *at = getenv("I8_SVE_AUTO_THREADS");
+        if (at && atoi(at) != 0)
+            req = i8gemm_recommend_threads(M, K_r, N_r, req);
+    }
     const int hybrid = i8_use_hybrid_for_shape(M, K_r, N_r, req);
-    num_threads = i8_sve_effective_threads(num_threads, M, K_r, n_tiles,
+    num_threads = i8_sve_effective_threads(num_threads <= 0 ? req : num_threads,
+                                           M, K_r, n_tiles,
                                            hybrid ? (64L << 10) : -1);
 
     if (hybrid) {
