@@ -12,6 +12,9 @@
 >    `2048×16384×24 @t64` 3201→**5733（+79%）**（blocking_probe 实测）。
 > 5. **线程拐点 advisory** `i8gemm_recommend_threads`（opt-in，用 247 形状 knee 校准，97% GOPS-safe）。
 > 6. **独立 msplit lib**（只切 M + 小 M split-K，1.5–2.6× over 朴素 M-split）。
+> 7. **bf16 窄 N 修复**（`bf16_use_2d_split` 加 `n_tiles>=4` 门控）：`2048×16384×24 @t64`
+>    795→**1456（+83%）**、t48 +60%、t32 +35%（华为复测确认；i8 窄 N 修复的 bf16 版）。详见
+>    `bf16_transfer_analysis_2026-06-25.md`。
 >
 > **利用率现状（247 形状, peak 370.9/核, e2e 含 A-pack）**：单核 4.6–96.2%（好区间 84–96%，已贴微内核
 > 天花板，由 K 主导）；多核大形状 75–90%（4096³=90.3%）；峰值 ~21.4 TOPS。
