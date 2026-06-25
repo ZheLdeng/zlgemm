@@ -19,15 +19,17 @@ B=build/bench_dispatch_i8gemm_sve
 NPROC=$(nproc)
 CORES="${CORES:-0-$((NPROC-1))}"
 RUNS="${RUNS:-4}"
-PEAK="${I8_PEAK:-370.9}"
+DT="${DT:-i8}"                         # i8 | bf16
+# per-core 2-op peak (Huawei): i8 SVE 370.9 GOPS, bf16 SVE 185.4 GFLOPS
+PEAK="${I8_PEAK:-$([ "$DT" = bf16 ] && echo 185.4 || echo 370.9)}"
 MODE="${MODE:-all}"
 THREADS="${THREADS:-1 4 8 16 32 48 64}"
-OUT="${OUT:-../results/m8/huawei_fine_sweep.csv}"
+OUT="${OUT:-../results/m8/huawei_fine_sweep_$DT.csv}"
 if [ "${QUICK:-0}" = 1 ]; then RUNS=2; THREADS="1 8 32 64"; fi
 export GOMP_CPU_AFFINITY="$CORES" OMP_PLACES=cores OMP_PROC_BIND=close
 
 echo "############################################################"
-echo "# fine sweep  MODE=$MODE QUICK=${QUICK:-0}  CORES=$CORES"
+echo "# fine sweep  DT=$DT MODE=$MODE QUICK=${QUICK:-0}  CORES=$CORES"
 echo "#  THREADS='$THREADS' RUNS=$RUNS PEAK=$PEAK/core  nproc=$NPROC"
 echo "############################################################"
 
@@ -45,7 +47,7 @@ reps_for(){ local ops=$(( 2*$1*$2*$3 ))
   elif [ $ops -lt 64000000 ];   then echo 100
   elif [ $ops -lt 1000000000 ]; then echo 20
   else echo 4; fi; }
-gops(){ $B i8gemm_sve i8 "$1" "$2" "$3" "$4" 1 "$RUNS" "$5" 2>/dev/null | awk -F, '{print $11}'; }
+gops(){ $B i8gemm_sve "$DT" "$1" "$2" "$3" "$4" 1 "$RUNS" "$5" 2>/dev/null | awk -F, '{print $11}'; }
 
 mkdir -p "$(dirname "$OUT")"
 echo "part,M,K,N,best_t,best_gops,best_util,knee_t,knee_gops,knee_util,t1_gops,t1_util" > "$OUT"
