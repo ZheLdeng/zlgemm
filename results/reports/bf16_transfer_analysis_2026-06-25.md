@@ -74,3 +74,19 @@ GFLOPS(2op)**，不是 185.4。185.4 是把 cpufb 92.72 误 ×2（和 i8 当初 
 
 **动作**：把 bf16 peak 口径从 185.4 改成 **92.8**（`huawei_fine_sweep.sh` DT=bf16 默认已改；华为文档同步）。
 **结论**：bf16 这轮 = 窄 N 调度修复（+35–83%，已落地）+ 峰值口径修正（bf16 实已 ~96% 单核最优）。无微内核工作项。
+
+## 8. Max-GOPS 审计 (huawei_maxgops_probe) + bf16 小 M 坍塌修复
+追求最高 GOPS（不在乎核）时，审计 clamp on/off：
+- **i8 clamp 净正向**：`64×512×256` 关 clamp 坍塌到 469 vs 开 clamp 1375（+193%）；代价是 `128×256×256`
+  被多砍 −17%（1091 vs 1318）。collapse 保护 ≫ over-cut → **i8 保持 clamp on**。
+- **bf16 无 clamp → `8×512×512` 坍塌**：default(全线程,A-pack fork) 72 vs 少线程 363（−80%）。
+- **catch-22**：`64×512×256`(需 clamp) 与 `128×256×256`(不需) **macs 相同(8.4M) 但最优线程相反**(16 vs 64)
+  → 单一 macs 阈值无法两全。完全的 max-GOPS-everywhere 需 per-shape autotuning。
+
+**修复 bf16 小 M 坍塌**（commit 见下）：把 `bf16_use_no_reorder_for_shape` 的默认门控从 `M<=8&&n_tiles<=2`
+broaden 到也含 `M<=16 && K_r<=1024`（加 K_r 参数）。小 M 走 no-reorder（跳过 A-pack fork）→ 像 i8 small-M→hybrid
+那样扩展，**不需要 clamp、也不动中等立方体**。正确性：`check_bf16_split` 11 形状(含 8×512×512/16×1024×512)
+×{default,m,n,2d,noreorder} 全 OK。**待华为复测**：`8×512×512` default 应从 72 升到 ~363+。
+
+**结论（max GOPS）**：i8 已净最优（clamp on）；bf16 修了 8×512×512 坍塌（小 M 路由）。两者残留的中等立方体
+over-cut（128×256×256 等 −17~27%）是 macs-相同-最优线程-相反的 catch-22，无静态默认解，需 autotune（可选未来项）。

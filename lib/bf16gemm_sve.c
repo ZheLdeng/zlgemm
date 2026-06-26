@@ -107,7 +107,7 @@ static int bf16_no_reorder_max_m_env(int *has_env) {
     return value;
 }
 
-static int bf16_use_no_reorder_for_shape(int M, int n_tiles) {
+static int bf16_use_no_reorder_for_shape(int M, int K_r, int n_tiles) {
     int has_env = 0;
     int max_m = bf16_sve_schedule.no_reorder_max_m;
     int env_max_m = bf16_no_reorder_max_m_env(&has_env);
@@ -115,7 +115,18 @@ static int bf16_use_no_reorder_for_shape(int M, int n_tiles) {
         max_m = env_max_m;
     if (max_m >= 0)
         return max_m > 0 && M <= max_m;
-    return M <= 8 && n_tiles <= 2;
+    if (M <= 8 && n_tiles <= 2)
+        return 1;
+    /*
+     * Small-M, larger-N: skip the separate A-pack OpenMP region (no_reorder) so
+     * a tiny shape does not fork 64-80 threads to pack a few rows and collapse.
+     * Mirrors the i8 small-M -> hybrid routing (M<=16, K_r<=1024) that fixed the
+     * identical i8 8x512x512 collapse. Measured on Huawei (bf16, t64): without
+     * this 8x512x512 runs the A-pack fork and collapses to ~72 GFLOPS; the
+     * no-reorder path scales (~363+). K bounded so deep-K small-M (already fine
+     * on the packed path, e.g. 8x4096x1024) is unaffected.
+     */
+    return M <= 16 && K_r <= 1024;
 }
 
 static int bf16_effective_threads(int num_threads, int M, int K_r, int N_r,
@@ -592,7 +603,7 @@ void bf16gemm_mt_dispatch(const bf16_t *A, const bf16_t *B_reo,
     const int n_tiles = N_r / n_tile;
     num_threads = bf16_effective_threads(num_threads, M, K_r, N_r, n_tiles);
     const size_t a_stride = bf16_a_reorder_stride(K_r);
-    const int no_reorder = bf16_use_no_reorder_for_shape(M, n_tiles);
+    const int no_reorder = bf16_use_no_reorder_for_shape(M, K_r, n_tiles);
     const int use_n_split = bf16_use_n_split(M, K_r, N_r, n_tiles, num_threads);
 
     if (bf16_use_kblock_split() && num_threads == 1 &&
@@ -1128,7 +1139,7 @@ void bf16gemm_mt_dispatch_bias_f(const bf16_t *A, const bf16_t *B_reo,
     const int n_tiles = N_r / n_tile;
     num_threads = bf16_effective_threads(num_threads, M, K_r, N_r, n_tiles);
     const size_t a_stride = bf16_a_reorder_stride(K_r);
-    const int no_reorder = bf16_use_no_reorder_for_shape(M, n_tiles);
+    const int no_reorder = bf16_use_no_reorder_for_shape(M, K_r, n_tiles);
     const int use_n_split = bf16_use_n_split(M, K_r, N_r, n_tiles, num_threads);
     num_threads = bf16_clamp_threads_for_split(num_threads, M, n_tiles,
                                                use_n_split);
@@ -1215,7 +1226,7 @@ void bf16gemm_mt_dispatch_nld_b(const bf16_t *A, const bf16_t *B_reo,
     const int n_tiles = N_r / n_tile;
     num_threads = bf16_effective_threads(num_threads, M, K_r, N_r, n_tiles);
     const size_t a_stride = bf16_a_reorder_stride(K_r);
-    const int no_reorder = bf16_use_no_reorder_for_shape(M, n_tiles);
+    const int no_reorder = bf16_use_no_reorder_for_shape(M, K_r, n_tiles);
     const int use_n_split = bf16_use_n_split(M, K_r, N_r, n_tiles, num_threads);
     num_threads = bf16_clamp_threads_for_split(num_threads, M, n_tiles,
                                                use_n_split);

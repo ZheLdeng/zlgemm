@@ -25,7 +25,7 @@ static int check(int M,int K,int N){
 }
 int main(void){
     int ok=1, n=0;
-    int shapes[][3]={{2048,256,24},{512,512,32},{128,1024,48},{2048,512,64},{64,256,16},{256,256,256},{1,1024,4096},{8,512,500}};
+    int shapes[][3]={{2048,256,24},{512,512,32},{128,1024,48},{2048,512,64},{64,256,16},{256,256,256},{1,1024,4096},{8,512,500},{8,512,512},{16,1024,512},{4,768,640}};
     for(unsigned s=0;s<sizeof(shapes)/sizeof(shapes[0]);s++){ n++; if(!check(shapes[s][0],shapes[s][1],shapes[s][2])) ok=0; }
     printf("bf16 split-path check: %s (%d shapes, default+2d+m forced via env)\n", ok?"OK":"FAIL", n);
     return ok?0:1;
