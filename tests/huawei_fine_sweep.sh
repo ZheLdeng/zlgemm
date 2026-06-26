@@ -20,8 +20,9 @@ NPROC=$(nproc)
 CORES="${CORES:-0-$((NPROC-1))}"
 RUNS="${RUNS:-4}"
 DT="${DT:-i8}"                         # i8 | bf16
-# per-core 2-op peak (Huawei): i8 SVE 370.9 GOPS, bf16 SVE 185.4 GFLOPS
-PEAK="${I8_PEAK:-$([ "$DT" = bf16 ] && echo 185.4 || echo 370.9)}"
+# per-core 2-op peak (Huawei, measured by huawei_*roofline): i8 smmla 1/cycle ->
+# 370.9 GOPS; bf16 bfmmla 0.5/cycle -> 92.8 GFLOPS (NOT 185.4: bfmmla is half-rate).
+PEAK="${I8_PEAK:-$([ "$DT" = bf16 ] && echo 92.8 || echo 370.9)}"
 MODE="${MODE:-all}"
 THREADS="${THREADS:-1 4 8 16 32 48 64}"
 OUT="${OUT:-../results/m8/huawei_fine_sweep_$DT.csv}"

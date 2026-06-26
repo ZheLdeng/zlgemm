@@ -32,7 +32,8 @@
 > - **真实单核 SVE i8 计算上限 = 370.9 GOPS(2op)**（=1 smmla/cycle×64MAC×2.9G），kernel 的 compute_only 已打满它。
 >   报告原来的「峰值 741.6 / 只到 50%」是**按 2 smmla/cycle（像 V1）算错了**——华为这颗核 smmla 只有 V1 的一半吞吐（V1=1.99/cycle）。**微内核没有 2× 可挖。**
 > - NEON smmla=1.704/cycle 但每条只 32MAC → 316.3 GOPS < SVE 370.9 → **NEON 更差，defect #3（NEON 路由）也关闭**。
-> - ⚠️ 所有「% of peak」必须改用 **370.9（i8）/ 185.4（bf16）** 重算，不能再用 660/741.6。
+> - ⚠️ 所有「% of peak」必须改用 **370.9（i8）/ 92.8（bf16）** 重算，不能再用 660/741.6/185.4。
+>   （bf16 92.8 由 huawei_bf16_roofline 实测 0.5 bfmmla/cycle 确认；早期写的 185.4 是误×2。）
 >
 > ### B. 用真实数据(`results/m8/m8_results.xlsx`)重算 → 真正的瓶颈是 **t79 调度坍塌**
 > 大形状在 **t64 已到真实上限的 84–92%**（如 2048×4096×2048 @t64=325 GOPS/核=87.7%）——计算+扩展都接近最优。
@@ -68,14 +69,16 @@ branch `sched-linearity-opt`,已 push)。剩下两项(微内核 50% 计算天花
 - **单核峰值(换算成 bench 的 2-op GOPS 计法 = cpufb 数值 ×2):**
   - SVE i8 `sve_mmla` = **741.6 GOPS**(cpufb 370.82,IPC 1.0,latency 4)
   - NEON i8 `mmla` = 600.8 GOPS(cpufb 300.42,IPC 1.62)
-  - SVE bf16 `bfmmla` = 185.4 GFLOPS(cpufb 92.72)
+  - SVE bf16 `bfmmla` = **92.8 GFLOPS(2op)** = 0.5 bfmmla/cycle×32MAC×2.9G
+    (实测 `tests/experimental/huawei_bf16_roofline` ~92.7, bfmmla/cycle≈0.50;
+     旧值 185.4 是把 cpufb 92.72 误×2，已更正)
 - **80 核微基准聚合**:`sve_mmla` 28.324 TOPS → 354 GOPS/核(1-op)= **95.5% 线性**。
   ⇒ **硬件到 80 核仍近线性;所有掉速都是 kernel 的问题,不是机器的。**
 
 ### ⚠️ 基准换算坑(读 xlsx 必看)
 `m8_results_new.xlsx` 的 `pct_of_baseline` 用的是**硬编码 660**(AWS Neoverse-V1 的 i8 峰值),
 **不是华为的**。华为真实 SVE i8 峰值是 **741.6**(2-op),NEON i8 是 600.8。
-分析利用率/天花板时必须用华为的数,不能直接信 xlsx 那列。bf16 baseline 330 → 华为 185.4。
+分析利用率/天花板时必须用华为的数,不能直接信 xlsx 那列。bf16 baseline 330 → 华为 **92.8**(实测 0.5 bfmmla/cycle;非 185.4)。
 
 ## 2. 80 核实测数据(`results/m8/m8_results_new.xlsx`)
 - 3 个 sheet:`dispatch`(真实 kernel 多线程性能,33 形状 × {1,2,4,8,16,32,64,80} 线程 × {sve,neon} × {i8,bf16}),
